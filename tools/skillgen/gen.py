@@ -1301,6 +1301,27 @@ def _is_labels_json_fix_line(line: str) -> bool:
     )
 
 
+def _is_scan_root_fix_line(line: str) -> bool:
+    """Whether a line is part of the scan-root-from-file fix (#4309).
+
+    v8 had the agent paste the scan path over ``INPUT_PATH`` inside the
+    double-quoted ``python -c`` bodies, so a folder name such as ``proj$(touch X)``
+    ran as shell code. The scripts now call ``read_scan_root()``, which reads the
+    root Step 1 saved. These are the removed paste lines and the added reads that
+    the manifest predicate above does not already cover.
+    """
+    stripped = line.strip()
+    return stripped in (
+        "from graphify.paths import out_path, read_scan_root",
+        "result = detect(read_scan_root(), extra_excludes=_read_build_excludes(out_path()), gitignore=_read_build_gitignore(out_path()))",
+        "result = detect_incremental(read_scan_root(), extra_excludes=_read_build_excludes(out_path()), gitignore=_read_build_gitignore(out_path()))",
+        "report = generate(G, communities, cohesion, labels, gods, surprises, detection, tokens, 'INPUT_PATH', suggested_questions=questions)",
+        "report = generate(G, communities, cohesion, labels, gods, surprises, detection, tokens, str(read_scan_root()), suggested_questions=questions)",
+        "Replace INPUT_PATH with the actual path the user provided. Do NOT cat or print the JSON - read it silently and present a clean summary instead:",
+        "Do NOT cat or print the JSON - read it silently and present a clean summary instead:",
+    )
+
+
 def _is_worktree_visibility_note_line(line: str) -> bool:
     """Whether a line is the Step 9 working-tree note (#3941).
 
@@ -1431,6 +1452,7 @@ _SANCTIONED_MONOLITH_DIFFS = (
     _is_code_only_fast_path_fix_line,
     _is_update_detect_populate_fix_line,
     _is_labels_json_fix_line,
+    _is_scan_root_fix_line,
 )
 
 

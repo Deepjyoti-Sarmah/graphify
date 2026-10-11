@@ -26,7 +26,12 @@ def _python_blocks(body: str, start: str, end: str) -> list[str]:
 
 
 def _run(source: str, *, cwd: Path, corpus: Path, spec: Path) -> None:
-    source = source.replace("INPUT_PATH", corpus.as_posix()).replace("SPEC_PATH", spec.as_posix())
+    # Step 1 saves the scan root; the scripts read it back instead of having it
+    # pasted in (#4309).
+    out = cwd / "graphify-out"
+    out.mkdir(exist_ok=True)
+    (out / ".graphify_root").write_text(corpus.as_posix(), encoding="utf-8")
+    source = source.replace("SPEC_PATH", spec.as_posix())
     subprocess.run([sys.executable, "-c", source], cwd=cwd, check=True,
                    capture_output=True, text=True)
 
