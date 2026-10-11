@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -305,3 +306,86 @@ def test_root_capture_rejects_input_with_more_than_one_line(tmp_path: Path):
     assert done.returncode != 0
     assert "line break" in done.stderr
     assert not (tmp_path / "graphify-out" / ".graphify_root").exists()
+
+# --- #4346: Step 1 must not leave empty or stale marker files ------------------
+
+
+def _write_old_markers(tmp_path: Path) -> Path:
+    """Markers a previous, successful run left behind (maybe for another project)."""
+    out = tmp_path / "graphify-out"
+    out.mkdir()
+    (out / ".graphify_python").write_text("/old/python", encoding="utf-8")
+    (out / ".graphify_root").write_text("/old/project", encoding="utf-8")
+    return out
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="ulimit is POSIX")
+@pytest.mark.parametrize("skill_file", ALL_TESTED_SKILL_FILES)
+def test_step1_fails_loudly_when_it_cannot_write(tmp_path: Path, skill_file: str):
+    """#4346: a full disk left empty marker files and Step 1 still exited 0.
+    `ulimit -f 0` makes every file write fail the way a full disk does."""
+    _skip_unless_bash_python_has_graphify()
+    script = _extract_step1_bash_block(skill_file)
+    script = script.replace(
+        "mkdir -p graphify-out", "mkdir -p graphify-out\ntrap '' XFSZ\nulimit -f 0", 1
+    )
+    out = _write_old_markers(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+
+    result = _run_step1(script, str(project), cwd=tmp_path)
+
+    assert result.returncode != 0, f"{skill_file}: Step 1 exited 0 after its writes failed"
+    assert "graphify-out/.graphify_" in result.stderr, result.stderr
+    # Nothing left behind: not an empty file, and not last run's answer either.
+    assert not (out / ".graphify_python").exists(), skill_file
+    assert not (out / ".graphify_root").exists(), skill_file
+
+
+@pytest.mark.parametrize("skill_file", ALL_TESTED_SKILL_FILES)
+def test_step1_replaces_markers_from_an_earlier_run(tmp_path: Path, skill_file: str):
+    """Writing through a temp file and a rename must still overwrite old markers."""
+    _skip_unless_bash_python_has_graphify()
+    script = _extract_step1_bash_block(skill_file)
+    out = _write_old_markers(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+
+    result = _run_step1(script, str(project), cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert Path((out / ".graphify_root").read_text(encoding="utf-8")).resolve() == project.resolve()
+    assert (out / ".graphify_python").read_text(encoding="utf-8") != "/old/python"
+    assert not list(out.glob(".graphify_*.tmp*")), "a temp file was left behind"
+
+
+def _extract_windows_step1() -> str:
+    text = (REPO_ROOT / "graphify" / "skill-windows.md").read_text(encoding="utf-8")
+    for block in re.findall(r"```powershell\n(.*?)\n```", text, re.S):
+        if "graphify_root" in block:
+            return block
+    raise AssertionError("could not find the Step 1 powershell block in skill-windows.md")
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="needs PowerShell (pwsh)")
+def test_windows_step1_fails_loudly_when_it_cannot_write(tmp_path: Path):
+    """#4346: WriteAllText threw and the script kept going. A directory where the
+    temp file goes makes the write fail on any OS. `ulimit -f 0` can't be used
+    here: it also stops pwsh itself from starting on CI ("Failed to create CoreCLR")."""
+    project = tmp_path / "project"
+    project.mkdir()
+    out = _write_old_markers(tmp_path)
+    (out / ".graphify_python.tmp").mkdir()          # the write to the temp file fails
+    script = _extract_windows_step1().replace("\nINPUT_PATH\n", f"\n{project}\n")
+    (tmp_path / "step1.ps1").write_text(script, encoding="utf-8")
+    env = {**os.environ, "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}"}
+
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-File", "step1.ps1"],
+        cwd=tmp_path, capture_output=True, text=True, env=env,
+    )
+
+    assert result.returncode != 0, "Windows Step 1 exited 0 after a write failed"
+    assert ".graphify_python" in result.stdout + result.stderr
+    assert not (out / ".graphify_python").is_file()
+    assert not (out / ".graphify_root").is_file()
