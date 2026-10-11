@@ -447,7 +447,8 @@ def read_scan_root() -> Path:
     marker = out_path(".graphify_root")
     if not marker.is_file():
         raise FileNotFoundError(f"{marker} not found; run Step 1 first")
-    text = marker.read_text(encoding="utf-8-sig").strip()
+    # Exact path: drop only a BOM (#3028) and a trailing newline, never spaces (#4346).
+    text = marker.read_text(encoding="utf-8-sig").removesuffix("\n").removesuffix("\r")
     if not text:
         raise ValueError(f"{marker} is empty; run Step 1 first")
     root = Path(text)

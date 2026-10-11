@@ -122,6 +122,19 @@ def test_read_scan_root_returns_the_recorded_root(tmp_path, monkeypatch):
     assert read_scan_root() == project.resolve()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows does not allow a trailing space in a folder name")
+def test_read_scan_root_keeps_a_trailing_space(tmp_path, monkeypatch):
+    """`.strip()` turned `proj ` into its sibling `proj` (#4346)."""
+    from graphify.paths import read_scan_root
+
+    spaced = tmp_path / "proj "
+    spaced.mkdir()
+    (tmp_path / "proj").mkdir()
+    _write_root(tmp_path, str(spaced))
+    monkeypatch.chdir(tmp_path)
+    assert read_scan_root() == spaced.resolve()
+
+
 def test_read_scan_root_accepts_a_subdirectory_of_the_cwd(tmp_path, monkeypatch):
     from graphify.paths import read_scan_root
 
