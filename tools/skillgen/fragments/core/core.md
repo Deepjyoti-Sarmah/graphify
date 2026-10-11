@@ -66,7 +66,7 @@ Only when the path is one or more `https://github.com/...` URLs, or several loca
 ### Step 2 - Detect files
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -c "
 import json
 from graphify.detect import detect
 from pathlib import Path
@@ -133,7 +133,7 @@ Note: Parallelizing AST + semantic saves 5-15s on large corpora. AST is determin
 For any code files detected, run AST extraction in parallel with Part B subagents:
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -c "
 import sys, json
 from graphify.paths import read_scan_root
 from graphify.extract import collect_files, extract
@@ -163,7 +163,7 @@ else:
 **Fast path:** If detection found zero docs, papers, and images (code-only corpus), skip Part B entirely and go straight to Part C. AST handles code - there is nothing for semantic subagents to do. **First write an empty semantic file** so Part C's merge has its input (it reads `.graphify_semantic.json` unconditionally; without this a code-only run hits `FileNotFoundError`):
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -c "
 import json
 from pathlib import Path
 Path('graphify-out/.graphify_semantic.json').write_text(json.dumps({'nodes':[],'edges':[],'hyperedges':[],'input_tokens':0,'output_tokens':0}), encoding='utf-8')
@@ -185,7 +185,7 @@ Before dispatching any subagents, check which files already have cached extracti
 SPEC_PATH below is the **absolute** path of the `references/extraction-spec.md` that ships beside this SKILL.md — the same file Step B2 loads and hands to every subagent. It is the extraction prompt, so cache entries are attributed to it: when a graphify upgrade changes the prompt, entries produced by the old one are re-extracted instead of replayed, and unchanged prompts keep their entries (#1939). Substitute the real path in both Step B0 and Step B3 — pass the same one to each, and do not drop the argument.
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -c "
 import json
 from graphify.paths import read_scan_root
 from graphify.cache import check_semantic_cache
@@ -234,7 +234,7 @@ If more than half the chunks failed or are missing, stop and tell the user to re
 
 Merge all chunk files into `.graphify_semantic_new.json`. **After each Agent call completes, read the real token counts from the Agent tool result's `usage` field and write them back into the chunk JSON before merging** — the chunk JSON itself always has placeholder zeros. Then run:
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -c "
 import json, glob
 from pathlib import Path
 
@@ -258,7 +258,7 @@ print(f'Merged {len(chunks)} chunks: {total_in:,} in / {total_out:,} out tokens'
 
 Save new results to cache. Pass the same SPEC_PATH as Step B0 — it stamps each entry with the prompt that produced it, and a write under a different prompt than the read lands where the next run won't look (#1939):
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -c "
 import json
 from graphify.paths import read_scan_root
 from graphify.cache import save_semantic_cache
@@ -273,7 +273,7 @@ print(f'Cached {saved} files')
 
 Merge cached + new results into `graphify-out/.graphify_semantic.json`:
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -c "
 import json
 from pathlib import Path
 
@@ -306,7 +306,7 @@ Clean up temp files: `rm -f graphify-out/.graphify_cached.json graphify-out/.gra
 #### Part C - Merge AST + semantic into final extraction
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -c "
 import sys, json
 from pathlib import Path
 
@@ -355,7 +355,7 @@ print(f'Merged: {total} nodes, {edges} edges ({len(ast[\"nodes\"])} AST + {len(s
 
 ```bash
 mkdir -p graphify-out
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -c "
 import sys, json
 from graphify.paths import read_scan_root
 from graphify.build import build_from_json
@@ -418,7 +418,7 @@ If this step prints `ERROR: Graph is empty`, stop and tell the user what happene
 A non-destructive diagnostic on the extraction, before labeling. It surfaces edge collapse, dangling/missing endpoints, and self-loops — the silent-corruption modes of incremental updates and AST/LLM id mismatches. Read-only; never aborts.
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -c "
 import json
 from graphify.paths import read_scan_root
 from pathlib import Path
@@ -452,7 +452,7 @@ Then regenerate the report and save the labels for the visualizer:
 cat > graphify-out/.graphify_labels_in.json <<'GRAPHIFY_LABELS_EOF'
 {"0": "Attention Mechanism", "1": "Training Pipeline"}
 GRAPHIFY_LABELS_EOF
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -c "
 import sys, json
 from graphify.build import build_from_json
 from graphify.cluster import score_all
@@ -528,7 +528,7 @@ These run only when their flag is present (`--wiki`, `--neo4j`/`--neo4j-push`, `
 ### Step 9 - Save manifest, update cost tracker, clean up, and report
 
 ```bash
-$(cat graphify-out/.graphify_python) -c "
+"$(cat graphify-out/.graphify_python)" -c "
 import json
 from graphify.paths import read_scan_root
 from pathlib import Path

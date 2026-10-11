@@ -392,7 +392,7 @@ def _render_frontmatter(platform: Platform) -> str:
 # would drift), the composed body is translated deterministically:
 #
 #   * ```` ```bash ```` fences become ```` ```powershell ```` fences;
-#   * the inline ``$(cat graphify-out/.graphify_python) -c "..."`` python blocks
+#   * the inline ``"$(cat graphify-out/.graphify_python)" -c "..."`` python blocks
 #     become single-quoted here-strings piped to the interpreter's stdin
 #     (``@'...'@ | & (Get-Content graphify-out\.graphify_python) -``). A
 #     single-quoted here-string is verbatim, so the bash ``\"`` escapes are
@@ -407,7 +407,7 @@ def _render_frontmatter(platform: Platform) -> str:
 # untranslated bash to the Windows variant. ``_POWERSHELL_BANNED_TOKENS`` is the
 # belt-and-braces post-check on the final body.
 
-_PY_INVOKE_POSIX = '$(cat graphify-out/.graphify_python) -c "'
+_PY_INVOKE_POSIX = '"$(cat graphify-out/.graphify_python)" -c "'
 _PY_INVOKE_PS_OPEN = "@'"
 _PY_INVOKE_PS_CLOSE = "'@ | & (Get-Content graphify-out\\.graphify_python) -"
 # Step 5 hands the community names to the script as a JSON file written through a
@@ -1456,6 +1456,19 @@ _SANCTIONED_MONOLITH_DIFFS = (
 )
 
 
+def _unquote_interpreter(line: str) -> str:
+    """Undo the interpreter-path quoting so the round-trip ignores it (#4309).
+
+    v8 ran ``$(cat graphify-out/.graphify_python)`` unquoted, so an interpreter
+    under ``/Users/First Last/`` split into two words. Every invocation is now
+    quoted. That touches dozens of lines, so instead of a predicate that would
+    sanction any line running the interpreter, the rendered side is unquoted
+    before the diff: a line that differs only by the quotes cancels out, and any
+    other edit on it is still flagged.
+    """
+    return line.replace('"$(cat graphify-out/.graphify_python)"', "$(cat graphify-out/.graphify_python)")
+
+
 def _is_sanctioned_monolith_diff(line: str) -> bool:
     """Whether a single added/removed monolith line is an allowed change."""
     return not line.strip() or any(pred(line) for pred in _SANCTIONED_MONOLITH_DIFFS)
@@ -1483,7 +1496,7 @@ def monolith_roundtrip(platform: Platform) -> list[str]:
     if platform.roundtrip_ref is None:
         return [f"[{platform.key}] monolith is missing roundtrip_ref"]
 
-    rendered_lines = render(platform)[0].content.splitlines()
+    rendered_lines = [_unquote_interpreter(l) for l in render(platform)[0].content.splitlines()]
     # Strip trigger lines from the original — they are non-spec and their removal
     # (#1180) is a permitted diff.
     original_lines = [
