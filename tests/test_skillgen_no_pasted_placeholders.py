@@ -25,7 +25,7 @@ from tools.skillgen import gen
 
 # Values the agent pastes by hand. IS_DIRECTED is deliberately absent: it is a
 # True/False taken from the user's own --directed flag, and the corpus cannot reach it.
-PASTED_PLACEHOLDERS = ("INPUT_PATH", "LABELS_DICT")
+PASTED_PLACEHOLDERS = ("INPUT_PATH", "LABELS_DICT", "SPEC_PATH")
 
 _BASH_SCRIPT = re.compile(r' -c "\n(.*?)\n"(?:\n|$)', re.S)
 # A PowerShell script opens on a line that is exactly @' and closes on the interpreter
@@ -196,5 +196,23 @@ def test_labels_heredoc_keeps_hostile_text_as_data(tmp_path):
     script = "mkdir -p graphify-out\n" + "\n".join(heredoc)
     subprocess.run(["bash", "-c", script], cwd=tmp_path, check=True)
     saved = json.loads((tmp_path / "graphify-out/.graphify_labels_in.json").read_text())
+    assert saved == hostile
+    assert not (tmp_path / "PWNED").exists() and not (tmp_path / "PWNED2").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="runs the bash block")
+def test_spec_heredoc_keeps_hostile_text_as_data(tmp_path):
+    """Run the real Step B0 heredoc from skill.md with a hostile spec path."""
+    hostile = "/opt/x'$(touch PWNED)`touch PWNED2`/references/extraction-spec.md"
+    text = dict(_artifacts())["graphify/skill.md"]
+    block = next(b for b in _bash_fences(text) if "<<'GRAPHIFY_SPEC_EOF'" in b)
+    lines = block.splitlines()
+    first = next(i for i, line in enumerate(lines) if line.startswith("cat > "))
+    last = lines.index("GRAPHIFY_SPEC_EOF")
+    heredoc = lines[first : last + 1]
+    heredoc[1] = hostile
+    script = "mkdir -p graphify-out\n" + "\n".join(heredoc)
+    subprocess.run(["bash", "-c", script], cwd=tmp_path, check=True)
+    saved = (tmp_path / "graphify-out/.graphify_spec_path").read_text(encoding="utf-8").strip()
     assert saved == hostile
     assert not (tmp_path / "PWNED").exists() and not (tmp_path / "PWNED2").exists()

@@ -1133,11 +1133,14 @@ def test_semantic_cache_calls_pass_prompt_file_for_every_split_host():
     for a in bodies:
         for call in ("check_semantic_cache(", "save_semantic_cache("):
             line = next(ln for ln in a.content.splitlines() if call in ln and "import" not in ln)
-            assert "prompt_file='SPEC_PATH'" in line, (
+            assert "prompt_file=Path('graphify-out/.graphify_spec_path').read_text(" in line, (
                 f"{a.path}: {call} must pass prompt_file so entries are attributed "
                 f"to the extraction prompt (#1939) — got: {line.strip()}"
             )
-        # The placeholder is inert unless the body tells the agent what to substitute.
+        # The file is empty unless the body writes it and tells the agent what to put there.
+        # bash writes it through a heredoc; the PowerShell render through Set-Content.
+        assert ("cat > graphify-out/.graphify_spec_path" in a.content
+                or "Set-Content -Encoding utf8 graphify-out\\.graphify_spec_path" in a.content), a.path
         assert "SPEC_PATH below is the **absolute** path" in a.content, a.path
 
 

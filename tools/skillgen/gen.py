@@ -410,14 +410,26 @@ def _render_frontmatter(platform: Platform) -> str:
 _PY_INVOKE_POSIX = '"$(cat graphify-out/.graphify_python)" -c "'
 _PY_INVOKE_PS_OPEN = "@'"
 _PY_INVOKE_PS_CLOSE = "'@ | & (Get-Content graphify-out\\.graphify_python) -"
-# Step 5 hands the community names to the script as a JSON file written through a
-# quoted heredoc (#4309). The PowerShell twin is a single-quoted here-string, which
-# is just as literal. Only this exact opener is recognized; any other heredoc still
-# raises.
+# Values the agent supplies reach the scripts as files written through a quoted
+# heredoc (#4309): Step 5's community names and Step B0's extraction spec path. The
+# PowerShell twin is a single-quoted here-string, which is just as literal. Only
+# these exact openers are recognized; any other heredoc still raises.
 _LABELS_HEREDOC_OPEN = "cat > graphify-out/.graphify_labels_in.json <<'GRAPHIFY_LABELS_EOF'"
 _LABELS_HEREDOC_END = "GRAPHIFY_LABELS_EOF"
-_LABELS_PS_OPEN = "@'"
-_LABELS_PS_CLOSE = "'@ | Set-Content -Encoding utf8 graphify-out\\.graphify_labels_in.json"
+_SPEC_HEREDOC_OPEN = "cat > graphify-out/.graphify_spec_path <<'GRAPHIFY_SPEC_EOF'"
+_SPEC_HEREDOC_END = "GRAPHIFY_SPEC_EOF"
+_DATA_PS_OPEN = "@'"
+# opener -> (end marker, PowerShell closer that writes the same file)
+_DATA_HEREDOCS = {
+    _LABELS_HEREDOC_OPEN: (
+        _LABELS_HEREDOC_END,
+        "'@ | Set-Content -Encoding utf8 graphify-out\\.graphify_labels_in.json",
+    ),
+    _SPEC_HEREDOC_OPEN: (
+        _SPEC_HEREDOC_END,
+        "'@ | Set-Content -Encoding utf8 graphify-out\\.graphify_spec_path",
+    ),
+}
 _MKDIR_POSIX = "mkdir -p graphify-out"
 _MKDIR_PS = "New-Item -ItemType Directory -Force -Path graphify-out | Out-Null"
 _FIND_CHUNKS_POSIX = "find graphify-out -maxdepth 1 -name '.graphify_chunk_*.json' -delete 2>/dev/null"
@@ -466,14 +478,14 @@ def _translate_bash_block(lines: list[str]) -> list[str]:
     """Translate the body of one ```` ```bash ```` fence to PowerShell."""
     out: list[str] = []
     in_py = False
-    in_labels = False
+    in_data: tuple[str, str] | None = None  # (end marker, PowerShell closer)
     for line in lines:
-        if in_labels:
-            if line == _LABELS_HEREDOC_END:
-                out.append(_LABELS_PS_CLOSE)
-                in_labels = False
+        if in_data:
+            if line == in_data[0]:
+                out.append(in_data[1])
+                in_data = None
             elif line.lstrip().startswith("'@"):
-                raise ValueError(f"labels line would close the here-string: {line!r}")
+                raise ValueError(f"heredoc line would close the here-string: {line!r}")
             else:
                 out.append(line)
         elif in_py:
@@ -482,9 +494,9 @@ def _translate_bash_block(lines: list[str]) -> list[str]:
                 in_py = False
             else:
                 out.append(_unescape_bash_dq(line))
-        elif line == _LABELS_HEREDOC_OPEN:
-            out.append(_LABELS_PS_OPEN)
-            in_labels = True
+        elif line in _DATA_HEREDOCS:
+            out.append(_DATA_PS_OPEN)
+            in_data = _DATA_HEREDOCS[line]
         elif line == _PY_INVOKE_POSIX:
             out.append(_PY_INVOKE_PS_OPEN)
             in_py = True
@@ -500,8 +512,8 @@ def _translate_bash_block(lines: list[str]) -> list[str]:
             raise ValueError(f"cannot translate bash line to PowerShell: {line!r}")
     if in_py:
         raise ValueError("unterminated python -c body in bash fence")
-    if in_labels:
-        raise ValueError("unterminated labels heredoc in bash fence")
+    if in_data:
+        raise ValueError(f"unterminated {in_data[0]} heredoc in bash fence")
     return out
 
 
