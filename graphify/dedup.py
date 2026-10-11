@@ -402,13 +402,16 @@ def _lifecycle_penalty(rank_path: str) -> int:
 def _rank_path(source_file: str, root: Path | None) -> str:
     """The root-relative form of ``source_file`` used for collision ranking.
 
-    Mirrors ``_source_key`` in extractors/resolution.py: with a scan root, an
-    absolute stored path and its repo-relative twin rank identically, and the
-    checkout location's own segments never participate (#2532). Without a root
-    (or when relativizing fails) the normalized stored path is used as-is.
+    With a scan root, an absolute stored path and its repo-relative twin rank
+    identically, and the checkout location's own segments never participate
+    (#2532). A relative stored path is already root-relative and is used as-is;
+    unlike ``_source_key`` in extractors/resolution.py, it is not resolved
+    against the CWD, so a run from a subdirectory of the root keys it the same
+    (#4281). Without a root (or when relativizing fails) the normalized stored
+    path is used as-is.
     """
     normalized = source_file.replace("\\", "/")
-    if root is not None and normalized:
+    if root is not None and normalized and Path(normalized).is_absolute():
         try:
             return Path(normalized).resolve().relative_to(root).as_posix()
         except Exception:
