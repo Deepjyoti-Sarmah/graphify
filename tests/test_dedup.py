@@ -1622,3 +1622,34 @@ def test_build_with_absolute_edge_paths_moves_edges_to_renamed_node(tmp_path):
     assert "firmware_lib_portal" in G and "firmware_lib_portal_html" in G
     assert G.has_edge("firmware_lib_portal_html", "card_a")
     assert not G.has_edge("firmware_lib_portal", "card_a")
+
+
+def test_build_from_subdirectory_moves_edges_to_renamed_node(tmp_path, monkeypatch):
+    """Nodes are root-relative by dedup time; run from a subdirectory of the root, a
+    relative path must not be resolved against the CWD, or the renamed node's key
+    stops matching its edges' and they stay on the survivor (#4281)."""
+    from graphify.build import build
+
+    root = tmp_path
+    (root / "firmware").mkdir()
+    monkeypatch.chdir(root / "firmware")
+    py = str(root / "firmware" / "lib" / "portal.py")
+    html = str(root / "firmware" / "lib" / "portal.html")
+    ext = {
+        "nodes": [
+            {"id": "firmware_lib_portal", "label": "portal.py", "file_type": "code",
+             "source_file": py},
+            {"id": "firmware_lib_portal", "label": "Portal page", "file_type": "document",
+             "source_file": html},
+            {"id": "card_a", "label": "Card A", "file_type": "document", "source_file": html},
+        ],
+        "edges": [
+            {"source": "firmware_lib_portal", "target": "card_a", "relation": "references",
+             "confidence": "EXTRACTED", "source_file": html},
+        ],
+    }
+    G = build([ext], root=str(root))
+
+    assert "firmware_lib_portal" in G and "firmware_lib_portal_html" in G
+    assert G.has_edge("firmware_lib_portal_html", "card_a")
+    assert not G.has_edge("firmware_lib_portal", "card_a")
