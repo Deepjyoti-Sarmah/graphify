@@ -210,6 +210,12 @@ def test_step1_still_resolves_a_legitimate_path(tmp_path: Path, skill_file: str)
         f"stdout={result.stdout!r} stderr={result.stderr!r}"
     )
     marker_content = marker.read_text(encoding="utf-8").strip()
+    # An empty marker would resolve to the cwd (the repo) and fail below with a
+    # misleading path mismatch; a full disk leaves Step 1's write empty.
+    assert marker_content, (
+        f"Step 1 wrote an empty {marker} for {skill_file}; "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
     if sys.platform == "win32" and project.drive:
         drive_letter = project.drive[0].lower()
         if marker_content.startswith(f"/mnt/{drive_letter}/"):
