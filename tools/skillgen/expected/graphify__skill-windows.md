@@ -124,7 +124,26 @@ if (-not $GRAPHIFY_PYTHON) {
 # rebuild fails with WinError 123 (#3028). WriteAllText with an explicit BOM-less
 # encoding writes the bytes POSIX writes, and adds no trailing newline.
 $Utf8NoBom = New-Object System.Text.UTF8Encoding $false
-[System.IO.File]::WriteAllText((Join-Path $PWD 'graphify-out\.graphify_python'), [string]$GRAPHIFY_PYTHON, $Utf8NoBom)
+# Remove last run's markers first, then write each through a temp file and a rename,
+# and stop with the file name if a write fails (#4346), so a full disk can't leave an
+# empty or stale marker behind.
+$OutDir = Join-Path $PWD 'graphify-out'
+foreach ($name in '.graphify_python', '.graphify_root') {
+    Remove-Item -LiteralPath (Join-Path $OutDir $name) -Force -ErrorAction SilentlyContinue
+}
+function Save-GraphifyMarker([string]$Name, [string]$Text) {
+    if (-not $Text) { throw "graphify: nothing to write to graphify-out\$Name" }
+    $path = Join-Path $OutDir $Name
+    $tmp = "$path.tmp"
+    try {
+        [System.IO.File]::WriteAllText($tmp, $Text, $Utf8NoBom)
+        Move-Item -LiteralPath $tmp -Destination $path -Force -ErrorAction Stop
+    } catch {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        throw "graphify: could not write graphify-out\$Name ($($_.Exception.Message); is the disk full?)"
+    }
+}
+Save-GraphifyMarker '.graphify_python' ([string]$GRAPHIFY_PYTHON)
 # Save scan root so `graphify update` (no args) knows where to look next time.
 # PowerShell never expands the scan path: it is captured through a single-quoted
 # (literal) here-string, not the command line. A path with a line break is refused,
@@ -135,7 +154,7 @@ INPUT_PATH
 '@
 $InputPathChecked = $InputPathRaw -replace '\n$', ''
 if ($InputPathChecked.Contains("`n") -or $InputPathChecked.Contains("`r")) { throw 'graphify: the scan path has a line break, so it was not used; give a single-line path' }
-[System.IO.File]::WriteAllText((Join-Path $PWD 'graphify-out\.graphify_root'), (Resolve-Path $InputPathRaw.Trim()).Path, $Utf8NoBom)
+Save-GraphifyMarker '.graphify_root' (Resolve-Path $InputPathRaw.Trim()).Path
 ```
 
 If the import succeeds, print nothing and move straight to Step 2.

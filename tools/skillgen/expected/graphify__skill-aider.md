@@ -89,15 +89,44 @@ if ! "$PYTHON" -c "import graphify" 2>/dev/null; then
           || "$PYTHON" -m pip install graphifyy -q --break-system-packages 2>&1 | tail -3
     fi
 fi
-# Write interpreter path for all subsequent steps (persists across invocations)
-mkdir -p graphify-out
-"$PYTHON" -c "import sys; open('graphify-out/.graphify_python', 'w', encoding='utf-8').write(sys.executable)"
-# Save scan root so `graphify update` (no args) knows where to look next time.
+# Save the interpreter path and the scan root for all later steps.
+# One Python call writes both (#4346): it first removes last run's files, writes
+# each through a temp file and a rename, and exits 1 naming the file if a write
+# fails, so a full disk can't leave an empty or stale marker behind.
 # The shell never expands the scan path: it goes through a quoted heredoc, not the
 # command line. A path with a line break is refused, because it could end the
 # heredoc early and run the lines after it as shell; the Python below also
 # rejects input of more than one line.
-"$PYTHON" -c "import os, sys; out_path = os.path.abspath('graphify-out/.graphify_root'); raw = sys.stdin.read(); path = raw[:-1] if raw.endswith('\n') else raw; sys.exit('graphify: the scan path has a line break, so it was not used; give a single-line path') if ('\n' in path or '\r' in path) else None; os.chdir(path); open(out_path, 'w', encoding='utf-8').write(os.getcwd())" <<'GRAPHIFY_ROOT_EOF'
+mkdir -p graphify-out
+"$PYTHON" -c "
+import os, sys
+out = os.path.abspath('graphify-out')
+for name in ('.graphify_python', '.graphify_root'):
+    try:
+        os.remove(os.path.join(out, name))
+    except FileNotFoundError:
+        pass
+def save(name, text):
+    path = os.path.join(out, name)
+    tmp = path + '.tmp'
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except OSError as e:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        sys.exit(f'graphify: could not write graphify-out/{name} ({e.strerror}; is the disk full?)')
+save('.graphify_python', sys.executable)
+raw = sys.stdin.read()
+path = raw[:-1] if raw.endswith('\n') else raw
+if '\n' in path or '\r' in path:
+    sys.exit('graphify: the scan path has a line break, so it was not used; give a single-line path')
+os.chdir(path)
+save('.graphify_root', os.getcwd())
+" <<'GRAPHIFY_ROOT_EOF'
 INPUT_PATH
 GRAPHIFY_ROOT_EOF
 ```

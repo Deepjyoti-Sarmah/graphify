@@ -1335,6 +1335,52 @@ def _is_scan_root_fix_line(line: str) -> bool:
     )
 
 
+def _is_step1_marker_write_fix_line(line: str) -> bool:
+    """Whether a line is part of the Step 1 marker-write fix (#4346).
+
+    Step 1 wrote ``.graphify_python`` and ``.graphify_root`` with a bare
+    ``open().write()``, so a full disk left an empty marker and Step 1 still exited
+    0. One Python call now removes last run's markers, writes each through a temp
+    file and a rename, and exits 1 naming the file. Both the removed v8 writer
+    lines and the added block match here.
+    """
+    stripped = line.strip()
+    return stripped in (
+        '"$PYTHON" -c "import sys; open(\'graphify-out/.graphify_python\', \'w\', encoding=\'utf-8\').write(sys.executable)"',
+        '# Write interpreter path for all subsequent steps (persists across invocations)',
+        '# Save the interpreter path and the scan root for all later steps.',
+        "# One Python call writes both (#4346): it first removes last run's files, writes",
+        '# each through a temp file and a rename, and exits 1 naming the file if a write',
+        "# fails, so a full disk can't leave an empty or stale marker behind.",
+        '"$PYTHON" -c "',
+        'import os, sys',
+        "out = os.path.abspath('graphify-out')",
+        "for name in ('.graphify_python', '.graphify_root'):",
+        'try:',
+        'os.remove(os.path.join(out, name))',
+        'except FileNotFoundError:',
+        'pass',
+        'def save(name, text):',
+        'path = os.path.join(out, name)',
+        "tmp = path + '.tmp'",
+        "with open(tmp, 'w', encoding='utf-8') as f:",
+        'f.write(text)',
+        'os.replace(tmp, path)',
+        'except OSError as e:',
+        'os.remove(tmp)',
+        'except OSError:',
+        "sys.exit(f'graphify: could not write graphify-out/{name} ({e.strerror}; is the disk full?)')",
+        "save('.graphify_python', sys.executable)",
+        "raw = sys.stdin.read()",
+        "path = raw[:-1] if raw.endswith('\\n') else raw",
+        "if '\\n' in path or '\\r' in path:",
+        "sys.exit('graphify: the scan path has a line break, so it was not used; give a single-line path')",
+        "os.chdir(path)",
+        "save('.graphify_root', os.getcwd())",
+        '" <<\'GRAPHIFY_ROOT_EOF\'',
+    )
+
+
 def _is_worktree_visibility_note_line(line: str) -> bool:
     """Whether a line is the Step 9 working-tree note (#3941).
 
@@ -1460,6 +1506,7 @@ _SANCTIONED_MONOLITH_DIFFS = (
     _is_watch_injection_fix_line,
     _is_graph_diff_direction_fix_line,
     _is_persisted_scan_options_fix_line,
+    _is_step1_marker_write_fix_line,
     _is_worktree_visibility_note_line,
     _is_semantic_origin_stamp_fix_line,
     _is_code_only_fast_path_fix_line,

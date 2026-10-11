@@ -27,7 +27,9 @@ from tools.skillgen import gen
 # True/False taken from the user's own --directed flag, and the corpus cannot reach it.
 PASTED_PLACEHOLDERS = ("INPUT_PATH", "LABELS_DICT", "SPEC_PATH")
 
-_BASH_SCRIPT = re.compile(r' -c "\n(.*?)\n"(?:\n|$)', re.S)
+# The closing quote may open a heredoc (Step 1 hands the scan path to Python that way);
+# the heredoc body is the sanctioned channel and is not part of the script.
+_BASH_SCRIPT = re.compile(r' -c "\n(.*?)\n"(?: <<\'[A-Z_]+\')?(?:\n|$)', re.S)
 # A PowerShell script opens on a line that is exactly @' and closes on the interpreter
 # pipe. The lookahead keeps a body from running across another here-string's closer.
 _POWERSHELL_SCRIPT = re.compile(
