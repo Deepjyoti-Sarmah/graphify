@@ -479,9 +479,14 @@ Replace INPUT_PATH with the actual path.
 
 Read `.graphify_analysis.json`. For each community key, look at its node labels and write a 2-5 word plain-language name (e.g. "Attention Mechanism", "Training Pipeline", "Data Loading").
 
+The first lines of the block below write the names as JSON, keyed by community number. Replace the example names with yours and escape any `"` or `\` inside a name. The heredoc marker is quoted, so the shell leaves the text alone.
+
 Then regenerate the report and save the labels for the visualizer:
 
 ```bash
+cat > graphify-out/.graphify_labels_in.json <<'GRAPHIFY_LABELS_EOF'
+{"0": "Attention Mechanism", "1": "Training Pipeline"}
+GRAPHIFY_LABELS_EOF
 $(cat graphify-out/.graphify_python) -c "
 import sys, json
 from graphify.build import build_from_json
@@ -489,6 +494,7 @@ from graphify.cluster import score_all
 from graphify.analyze import god_nodes, surprising_connections, suggest_questions
 from graphify.report import generate
 from graphify.export import to_json
+from graphify.paths import read_scan_root
 from pathlib import Path
 
 extraction = json.loads(Path('.graphify_extract.json').read_text())
@@ -500,13 +506,17 @@ communities = {int(k): v for k, v in analysis['communities'].items()}
 cohesion = {int(k): v for k, v in analysis['cohesion'].items()}
 tokens = {'input': extraction.get('input_tokens', 0), 'output': extraction.get('output_tokens', 0)}
 
-# LABELS - replace these with the names you chose above
-labels = LABELS_DICT
+# LABELS - the names written to graphify-out/.graphify_labels_in.json above. They are
+# parsed as JSON, never pasted into this script (#4309). A missing file raises.
+labels_file = Path('graphify-out/.graphify_labels_in.json')
+labels = {int(k): str(v) for k, v in json.loads(labels_file.read_text(encoding='utf-8-sig')).items()}
 
 # Regenerate questions with real community labels (labels affect question phrasing)
 questions = suggest_questions(G, communities, labels)
 
-report = generate(G, communities, cohesion, labels, analysis['gods'], analysis['surprises'], detection, tokens, 'INPUT_PATH', suggested_questions=questions)
+# Read from the file Step 1 wrote, never pasted into this script (#4309).
+scan_root = str(read_scan_root())
+report = generate(G, communities, cohesion, labels, analysis['gods'], analysis['surprises'], detection, tokens, scan_root, suggested_questions=questions)
 Path('graphify-out/GRAPH_REPORT.md').write_text(report)
 Path('.graphify_labels.json').write_text(json.dumps({str(k): v for k, v in labels.items()}))
 # Re-export so graph.json nodes carry the curated community_name (#2490).
@@ -515,12 +525,12 @@ Path('.graphify_labels.json').write_text(json.dumps({str(k): v for k, v in label
 wrote = to_json(G, communities, 'graphify-out/graph.json', community_labels=labels)
 if not wrote:
     print('ERROR: refused to shrink graphify-out/graph.json (fewer nodes than the existing graph). Run a full rebuild to be safe.')
+if wrote: labels_file.unlink()  # consumed; a missing file next run is then an error, not stale labels
 print('Report updated with community labels')
 "
 ```
 
-Replace `LABELS_DICT` with the actual dict you constructed (e.g. `{0: "Attention Mechanism", 1: "Training Pipeline"}`).
-Replace INPUT_PATH with the actual path.
+Replace `IS_DIRECTED` with `True` or `False` as in Step 4.
 
 ### Step 6 - Generate Obsidian vault (opt-in) + HTML
 

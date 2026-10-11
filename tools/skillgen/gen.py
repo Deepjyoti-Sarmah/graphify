@@ -410,6 +410,14 @@ def _render_frontmatter(platform: Platform) -> str:
 _PY_INVOKE_POSIX = '$(cat graphify-out/.graphify_python) -c "'
 _PY_INVOKE_PS_OPEN = "@'"
 _PY_INVOKE_PS_CLOSE = "'@ | & (Get-Content graphify-out\\.graphify_python) -"
+# Step 5 hands the community names to the script as a JSON file written through a
+# quoted heredoc (#4309). The PowerShell twin is a single-quoted here-string, which
+# is just as literal. Only this exact opener is recognized; any other heredoc still
+# raises.
+_LABELS_HEREDOC_OPEN = "cat > graphify-out/.graphify_labels_in.json <<'GRAPHIFY_LABELS_EOF'"
+_LABELS_HEREDOC_END = "GRAPHIFY_LABELS_EOF"
+_LABELS_PS_OPEN = "@'"
+_LABELS_PS_CLOSE = "'@ | Set-Content -Encoding utf8 graphify-out\\.graphify_labels_in.json"
 _MKDIR_POSIX = "mkdir -p graphify-out"
 _MKDIR_PS = "New-Item -ItemType Directory -Force -Path graphify-out | Out-Null"
 _FIND_CHUNKS_POSIX = "find graphify-out -maxdepth 1 -name '.graphify_chunk_*.json' -delete 2>/dev/null"
@@ -458,13 +466,25 @@ def _translate_bash_block(lines: list[str]) -> list[str]:
     """Translate the body of one ```` ```bash ```` fence to PowerShell."""
     out: list[str] = []
     in_py = False
+    in_labels = False
     for line in lines:
-        if in_py:
+        if in_labels:
+            if line == _LABELS_HEREDOC_END:
+                out.append(_LABELS_PS_CLOSE)
+                in_labels = False
+            elif line.lstrip().startswith("'@"):
+                raise ValueError(f"labels line would close the here-string: {line!r}")
+            else:
+                out.append(line)
+        elif in_py:
             if line == '"':
                 out.append(_PY_INVOKE_PS_CLOSE)
                 in_py = False
             else:
                 out.append(_unescape_bash_dq(line))
+        elif line == _LABELS_HEREDOC_OPEN:
+            out.append(_LABELS_PS_OPEN)
+            in_labels = True
         elif line == _PY_INVOKE_POSIX:
             out.append(_PY_INVOKE_PS_OPEN)
             in_py = True
@@ -480,6 +500,8 @@ def _translate_bash_block(lines: list[str]) -> list[str]:
             raise ValueError(f"cannot translate bash line to PowerShell: {line!r}")
     if in_py:
         raise ValueError("unterminated python -c body in bash fence")
+    if in_labels:
+        raise ValueError("unterminated labels heredoc in bash fence")
     return out
 
 
@@ -1244,6 +1266,41 @@ def _is_persisted_scan_options_fix_line(line: str) -> bool:
     )
 
 
+def _is_labels_json_fix_line(line: str) -> bool:
+    """Whether a line is part of the Step-5 labels-as-JSON fix (#4309).
+
+    v8 had the agent paste a Python dict over ``LABELS_DICT`` and the scan path over
+    ``INPUT_PATH`` inside the double-quoted ``python -c`` body, so a hostile label or
+    folder name ran as shell or Python. Step 5 now reads the names from a JSON file
+    the agent writes through a quoted heredoc, and the scan root from the file Step 1
+    wrote. These are the removed paste lines and the added file reads.
+    """
+    stripped = line.strip()
+    return (
+        stripped in (
+            "# LABELS - replace these with the names you chose above",
+            "labels = LABELS_DICT",
+            "report = generate(G, communities, cohesion, labels, analysis['gods'], analysis['surprises'], detection, tokens, 'INPUT_PATH', suggested_questions=questions)",
+            "Replace INPUT_PATH with the actual path.",
+            "from graphify.paths import read_scan_root",
+            "# LABELS - the names written to graphify-out/.graphify_labels_in.json above. They are",
+            "# parsed as JSON, never pasted into this script (#4309). A missing file raises.",
+            "labels_file = Path('graphify-out/.graphify_labels_in.json')",
+            "labels = {int(k): str(v) for k, v in json.loads(labels_file.read_text(encoding='utf-8-sig')).items()}",
+            "# Read from the file Step 1 wrote, never pasted into this script (#4309).",
+            "scan_root = str(read_scan_root())",
+            "report = generate(G, communities, cohesion, labels, analysis['gods'], analysis['surprises'], detection, tokens, scan_root, suggested_questions=questions)",
+            "cat > graphify-out/.graphify_labels_in.json <<'GRAPHIFY_LABELS_EOF'",
+            '{"0": "Attention Mechanism", "1": "Training Pipeline"}',
+            "GRAPHIFY_LABELS_EOF",
+            "Replace `IS_DIRECTED` with `True` or `False` as in Step 4.",
+        )
+        or stripped.startswith("Replace `LABELS_DICT` with the actual dict")
+        or stripped.startswith("if wrote: labels_file.unlink()")
+        or stripped.startswith("The first lines of the block below write the names as JSON")
+    )
+
+
 def _is_worktree_visibility_note_line(line: str) -> bool:
     """Whether a line is the Step 9 working-tree note (#3941).
 
@@ -1373,6 +1430,7 @@ _SANCTIONED_MONOLITH_DIFFS = (
     _is_semantic_origin_stamp_fix_line,
     _is_code_only_fast_path_fix_line,
     _is_update_detect_populate_fix_line,
+    _is_labels_json_fix_line,
 )
 
 

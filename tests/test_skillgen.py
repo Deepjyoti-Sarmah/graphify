@@ -468,6 +468,26 @@ def test_powershell_translator_rejects_unknown_bash():
     assert gen._translate_bash_block([gen._FIND_CHUNKS_POSIX]) == [gen._FIND_CHUNKS_PS]
 
 
+def test_labels_heredoc_becomes_a_powershell_here_string():
+    body = '{"0": "Data $(touch X) Loading", "1": "it\'s"}'
+    out = gen._translate_bash_block([gen._LABELS_HEREDOC_OPEN, body, gen._LABELS_HEREDOC_END])
+    assert out == [
+        "@'",
+        body,
+        "'@ | Set-Content -Encoding utf8 graphify-out\\.graphify_labels_in.json",
+    ]
+
+
+def test_labels_heredoc_rejects_a_line_that_would_close_the_here_string():
+    with pytest.raises(ValueError, match="close the here-string"):
+        gen._translate_bash_block([gen._LABELS_HEREDOC_OPEN, "'@", gen._LABELS_HEREDOC_END])
+
+
+def test_labels_heredoc_must_be_terminated():
+    with pytest.raises(ValueError, match="unterminated"):
+        gen._translate_bash_block([gen._LABELS_HEREDOC_OPEN, "{}"])
+
+
 def test_posix_hosts_keep_their_bash_invocations():
     """The translation is scoped to powershell-shell hosts: the POSIX core keeps
     its ``$(cat ...) -c`` blocks and bash fences byte-for-byte."""

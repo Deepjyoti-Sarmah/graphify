@@ -12,7 +12,9 @@ reintroduce it.
 """
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -178,3 +180,21 @@ def test_read_scan_root_treats_shell_syntax_as_a_plain_name(tmp_path, monkeypatc
     monkeypatch.chdir(tmp_path)
     assert read_scan_root() == hostile.resolve()
     assert not (tmp_path / "PWNED").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="runs the bash block")
+def test_labels_heredoc_keeps_hostile_text_as_data(tmp_path):
+    """Run the real heredoc block from skill.md with hostile labels."""
+    hostile = {"0": "x $(touch PWNED) `touch PWNED2` $HOME", "1": "it's \"q\" \\ end"}
+    text = dict(_artifacts())["graphify/skill.md"]
+    block = next(b for b in _bash_fences(text) if "<<'GRAPHIFY_LABELS_EOF'" in b)
+    lines = block.splitlines()
+    first = next(i for i, line in enumerate(lines) if line.startswith("cat > "))
+    last = lines.index("GRAPHIFY_LABELS_EOF")
+    heredoc = lines[first : last + 1]
+    heredoc[1] = json.dumps(hostile)
+    script = "mkdir -p graphify-out\n" + "\n".join(heredoc)
+    subprocess.run(["bash", "-c", script], cwd=tmp_path, check=True)
+    saved = json.loads((tmp_path / "graphify-out/.graphify_labels_in.json").read_text())
+    assert saved == hostile
+    assert not (tmp_path / "PWNED").exists() and not (tmp_path / "PWNED2").exists()
