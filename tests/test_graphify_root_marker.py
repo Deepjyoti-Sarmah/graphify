@@ -74,7 +74,9 @@ def test_hook_bodies_read_the_marker_without_stripping_spaces():
                  if "_saved.read_text(" in line]
         assert reads, "hook body no longer reads .graphify_root"
         for line in reads:
-            assert ".rstrip('\\r\\n')" in line and ".strip()" not in line, line
+            # No backslash: the body sits inside a shell double-quoted argument.
+            assert ".removesuffix(chr(10)).removesuffix(chr(13))" in line, line
+            assert ".strip()" not in line and "rstrip" not in line, line
 
 
 @trailing_space
@@ -88,7 +90,8 @@ def test_update_without_a_path_rebuilds_the_recorded_folder(tmp_path):
                             cwd=tmp_path, capture_output=True, text=True)
 
     assert result.returncode == 0, result.stderr
-    graph = (tmp_path / "graphify-out" / "graph.json").read_text(encoding="utf-8")
+    # update writes its output next to the folder it rebuilt, not into the cwd
+    graph = (spaced / "graphify-out" / "graph.json").read_text(encoding="utf-8")
     assert "only_in_spaced" in graph
     assert "only_in_sibling" not in graph
 
