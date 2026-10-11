@@ -106,3 +106,19 @@ def test_update_without_a_path_stops_on_an_empty_marker(tmp_path):
     assert result.returncode == 1
     assert ".graphify_root is empty" in result.stderr
     assert not (tmp_path / "graphify-out" / "graph.json").exists()
+
+
+def test_no_module_strips_the_marker_after_decoding_it():
+    """Every .graphify_root reader goes through read_root_marker (the hook bodies
+    use the same rule inline). `.strip()` after a utf-8-sig read is how the old
+    readers trimmed the path; watch.py and reflect.py were missed at first (#4346)."""
+    import graphify
+
+    pkg = Path(graphify.__file__).parent
+    offenders = [
+        f"{path.relative_to(pkg)}:{number}"
+        for path in pkg.rglob("*.py")
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if "utf-8-sig" in line and ".strip()" in line
+    ]
+    assert not offenders, offenders
