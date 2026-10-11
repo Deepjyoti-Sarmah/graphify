@@ -164,7 +164,7 @@ def test_read_scan_root_requires_step1_to_have_run(tmp_path, monkeypatch):
     from graphify.paths import read_scan_root
 
     monkeypatch.chdir(tmp_path)
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError, match="run Step 1 first"):
         read_scan_root()
 
 
