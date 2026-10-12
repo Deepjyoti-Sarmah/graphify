@@ -633,6 +633,142 @@ def _disambiguate_defining_collisions(
     return out_nodes, edges
 
 
+def _path_qualify_dropped_collisions(
+    nodes: list[dict], edges: list[dict], hyperedges: list[dict] | None,
+    root: Path | None,
+) -> tuple[list[dict], list[dict]]:
+    """Path-qualify semantic ids that dropped the directory, per file (#4281).
+
+    Semantic extraction sometimes mints an id from the bare filename stem, so
+    ``a/x.md`` and ``b/x.md`` both emit ``x``. This is the sibling of
+    ``_disambiguate_defining_collisions`` for different directories rather than
+    different extensions. Every colliding node is renamed to
+    ``<full path stem><rest of id>``, computed from the node's OWN source_file;
+    no file keeps the bare id, because picking one would be a guess.
+
+    Heuristic boundary:
+    - only ids spelled with a SHORTER-than-full path stem of the node's own file
+      are candidates (an id already carrying the full stem is left alone), and
+      AST-tier nodes are never touched;
+    - a source_file that is still absolute after rooting (no root, outside the
+      root, or the other platform's form) is never qualified, so the checkout
+      location cannot leak into an id;
+    - a group acts only when its files have at least two distinct full stems; a
+      lone candidate is left to ``build_from_json``'s semantic id remap;
+    - a group is skipped when ANY node in the input comes from the file whose
+      full stem is the id's shorter prefix (``protocol`` while ``protocol.md``
+      exists): that file is the one the bare id names, so the id may be a genuine
+      reference to it and stays on the definer-wins collapse-and-warn path;
+    - a reference to the bare id from ANOTHER file cannot be attributed to one
+      file, so it is left unresolved (one warning per id) rather than guessed;
+    - if the new id is already used by a node of a different file, or two files
+      of a group map to the same new id, the first file in sorted order keeps it
+      and the rest stay on the bare id and take the collapse-and-warn path.
+    """
+    from graphify.build import _is_abs, _is_ast_tier  # local: build imports dedup
+
+    def key(sf):
+        return _rank_path(sf, root) if sf and isinstance(sf, str) else ""
+
+    def qualified_id(node: dict) -> tuple[str, str] | None:
+        """``(new id, matched shorter prefix)`` for a candidate node, else None."""
+        nid = node.get("id")
+        sf = node.get("source_file")
+        if not nid or not isinstance(nid, str) or not sf or not isinstance(sf, str):
+            return None
+        if _is_ast_tier(node):
+            return None
+        rel = key(sf)
+        if _is_abs(rel):
+            # No root to relativize against: never bake an on-disk path into an id.
+            return None
+        full = _full_stem(rel)
+        matching = [p for p in _id_prefixes(rel) if nid == p or nid.startswith(f"{p}_")]
+        if not full or not matching:
+            return None
+        longest = max(matching, key=len)
+        if longest == full:
+            return None
+        return full + nid[len(longest):], longest
+
+    named_files = {
+        _full_stem(key(n["source_file"])) for n in nodes
+        if isinstance(n.get("source_file"), str) and n["source_file"]
+    }
+    by_id: dict[str, list[dict]] = defaultdict(list)
+    owners: dict[str, set[str]] = defaultdict(set)
+    for node in nodes:
+        nid = node.get("id")
+        if not nid or not isinstance(nid, str):
+            continue
+        owners[nid].add(key(node.get("source_file")))
+        if qualified_id(node):
+            by_id[nid].append(node)
+
+    renames: dict[tuple[str, str], str] = {}
+    kept_bare: set[tuple[str, str]] = set()
+    claimed: dict[str, str] = {}
+    for nid in sorted(by_id):
+        members = by_id[nid]
+        if len({key(m["source_file"]) for m in members}) < 2:
+            continue
+        if len({_full_stem(key(m["source_file"])) for m in members}) < 2:
+            continue
+        if any((qualified_id(m) or ("", ""))[1] in named_files for m in members):
+            continue
+        for m in sorted(members, key=lambda m: key(m["source_file"])):
+            k = key(m["source_file"])
+            if (nid, k) in renames or (nid, k) in kept_bare:
+                continue
+            qualified = qualified_id(m)
+            new_id = qualified[0] if qualified else None
+            if (new_id is None
+                    or any(o != k for o in owners.get(new_id, ()))
+                    or claimed.get(new_id, k) != k):
+                kept_bare.add((nid, k))
+                continue
+            claimed[new_id] = k
+            renames[(nid, k)] = new_id
+    if not renames:
+        return nodes, edges
+
+    out_nodes = []
+    for node in nodes:
+        new_id = renames.get((str(node.get("id") or ""), key(node.get("source_file"))))
+        out_nodes.append(dict(node, id=new_id) if new_id else node)
+    renamed_ids = {nid for nid, _ in renames}
+    unattributed: dict[str, int] = defaultdict(int)
+    for coll in (edges, hyperedges or []):
+        for item in coll:
+            if not isinstance(item, dict):
+                continue
+            k = key(item.get("source_file"))
+            refs = [item.get("source"), item.get("target")]
+            members = item.get("nodes")
+            if isinstance(members, list):
+                refs += members
+            for ref in refs:
+                if (isinstance(ref, str) and ref in renamed_ids
+                        and (ref, k) not in renames and (ref, k) not in kept_bare):
+                    unattributed[ref] += 1
+            for end in ("source", "target"):
+                ref = item.get(end)
+                new_id = renames.get((ref, k)) if isinstance(ref, str) else None
+                if new_id:
+                    item[end] = new_id
+            if isinstance(members, list):
+                item["nodes"] = [renames.get((m, k), m) if isinstance(m, str) else m
+                                 for m in members]
+    for nid in sorted(unattributed):
+        print(
+            f"[graphify] WARNING: node '{nid}' was minted by several files and "
+            f"renamed per file; {unattributed[nid]} reference(s) from other files "
+            f"could not be attributed and were left unresolved.",
+            file=sys.stderr,
+        )
+    return out_nodes, edges
+
+
 # ── main entry point ──────────────────────────────────────────────────────────
 
 def _remap_hyperedge_members(hyperedges: list[dict], remap: dict[str, str]) -> None:
@@ -730,6 +866,7 @@ def deduplicate_entities(
     # retained so AST structure and semantic enrichment can coexist (#2091).
     # Genuine cross-file ID collisions stay isolated and are reported below (#1504).
     nodes, edges = _disambiguate_defining_collisions(nodes, edges, hyperedges, root_resolved)
+    nodes, edges = _path_qualify_dropped_collisions(nodes, edges, hyperedges, root_resolved)
     seen_ids: dict[str, dict] = {}
     dropped: dict[str, list[dict]] = defaultdict(list)
     for node in nodes:
