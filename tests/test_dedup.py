@@ -1587,7 +1587,12 @@ def test_extension_rename_is_order_independent():
 def test_bare_id_across_different_paths_is_path_qualified(capsys):
     """A bare `protocol` shared by docs/protocol.md and docs/firmware/protocol.md,
     with no protocol.md anywhere: neither file is named by the bare id, so both are
-    definers and each gets its own path-qualified id (#4281 remaining case)."""
+    definers and each gets its own path-qualified id (#4281 remaining case).
+
+    No own-file `references` edge points at either copy here, so there is no
+    evidence that one of them is a mention of the other file, and both are renamed.
+    With that edge the same ids stay one node (a mention is not a second document):
+    see test_reference_to_another_file_does_not_become_a_second_document."""
     nodes = [
         {"id": "protocol", "label": "protocol", "file_type": "document",
          "source_file": "docs/protocol.md"},
@@ -1888,3 +1893,120 @@ def test_path_dropped_foreign_reference_edge_is_dropped_by_build(capsys):
     assert not G.has_edge("c_note", "b_x")
     assert ("node 'x' was minted by several files and renamed per file; "
             "1 reference(s)") in capsys.readouterr().err
+
+
+# ── #4281: a same-file reference is a mention, not a second document ──────────
+# Repro cases (notes 03-repro): D -> test_path_dropped_through_build,
+# F -> test_path_dropped_foreign_reference_edge_is_dropped_by_build,
+# R, R_labelswap, R_noedge, R_toplevel, G -> the tests below.
+
+def _mention_node(nid, label, source_file):
+    return {"id": nid, "label": label, "file_type": "document", "source_file": source_file}
+
+
+def _mention_edge(source, target, source_file):
+    return {"source": source, "target": target, "relation": "references",
+            "confidence": "EXTRACTED", "source_file": source_file}
+
+
+def _protocol_reference_input(*, edge=True, docs_label="Protocol",
+                              mention_label="protocol (top-level)", top_level=False):
+    """docs/firmware/protocol.md mints its own `docs_firmware_protocol` plus a bare
+    `protocol` that stands for another file; docs/protocol.md mints `protocol`."""
+    fw = "docs/firmware/protocol.md"
+    nodes = [_mention_node("protocol", docs_label, "docs/protocol.md"),
+             _mention_node("docs_firmware_protocol", "Firmware protocol", fw),
+             _mention_node("protocol", mention_label, fw)]
+    if top_level:
+        nodes.append(_mention_node("protocol", "Protocol (top-level)", "protocol.md"))
+    edges = [_mention_edge("docs_firmware_protocol", "protocol", fw)] if edge else []
+    return {"nodes": nodes, "edges": edges}
+
+
+def _assert_reference_lands_on_the_other_file(G):
+    assert sorted(G.nodes) == ["docs_firmware_protocol", "docs_protocol"]
+    # one edge, from the firmware doc to docs/protocol.md; a self-loop would collapse
+    # to a one-element frozenset and fail this comparison.
+    assert {frozenset(e) for e in G.edges} == {
+        frozenset(("docs_firmware_protocol", "docs_protocol"))}
+
+
+def test_reference_to_another_file_does_not_become_a_second_document():
+    """Case R. A bare id that another node of its own file `references`, and that is
+    itself a path slice (`protocol`), is a mention of a document: it is not renamed
+    into the mentioning file's own page, so the reference ends on docs/protocol.md.
+    Renaming it made `docs_firmware_protocol` reference itself (#4281)."""
+    from graphify.build import build
+
+    _assert_reference_lands_on_the_other_file(build([_protocol_reference_input()]))
+
+
+def test_reference_outcome_does_not_depend_on_label_length():
+    """Case R_labelswap. Same graph as above with the labels swapped, so the mention
+    has the shorter one. v8 kept the shorter label and dropped docs/protocol.md here."""
+    from graphify.build import build
+
+    G = build([_protocol_reference_input(docs_label="Protocol overview", mention_label="protocol")])
+    _assert_reference_lands_on_the_other_file(G)
+
+
+def test_mention_without_an_edge_gives_the_same_two_documents():
+    """Case R_noedge. With no `references` edge there is no evidence the bare id is a
+    mention, so both files are renamed per file; the result is still the two real
+    documents and no edge. The evidence only ever withholds a rename."""
+    from graphify.build import build
+
+    G = build([_protocol_reference_input(edge=False)])
+    assert sorted(G.nodes) == ["docs_firmware_protocol", "docs_protocol"]
+    assert list(G.edges) == []
+
+
+def test_top_level_collision_keeps_todays_result():
+    """Case R_toplevel. KNOWN LIMITATION, pinned so a change is noticed: with a
+    top-level protocol.md that also mints `protocol`, the three files collide and the
+    label tiebreak drops the top-level document's node. This is a separate genuine
+    collision from the mention rule and is not fixed here (#4281)."""
+    from graphify.build import build
+
+    G = build([_protocol_reference_input(top_level=True)])
+    assert sorted(G.nodes) == ["docs_firmware_protocol", "docs_protocol"]
+    assert {frozenset(e) for e in G.edges} == {
+        frozenset(("docs_firmware_protocol", "docs_protocol"))}
+
+
+def test_entity_described_in_two_documents_collapses_to_one_node(capsys):
+    """Case G, the shape of the reporter's warnings. `sender` is derived from neither
+    path and each document points at it, so the two copies are one entity: one node
+    with both edges, and the merge warning still prints (#4281)."""
+    from graphify.build import build
+
+    ext = {
+        "nodes": [_mention_node("docs_a_doc", "Doc A", "docs/a.md"),
+                  _mention_node("sender", "Sender service", "docs/a.md"),
+                  _mention_node("docs_b_doc", "Doc B", "docs/b.md"),
+                  _mention_node("sender", "Sender", "docs/b.md")],
+        "edges": [_mention_edge("docs_a_doc", "sender", "docs/a.md"),
+                  _mention_edge("docs_b_doc", "sender", "docs/b.md")],
+    }
+    G = build([ext])
+    assert sorted(G.nodes) == ["docs_a_doc", "docs_b_doc", "sender"]
+    assert {frozenset(e) for e in G.edges} == {
+        frozenset(("docs_a_doc", "sender")), frozenset(("docs_b_doc", "sender"))}
+    assert "node 'sender' is minted by two different files" in capsys.readouterr().err
+
+
+def test_reference_evidence_does_not_change_survivors_of_other_collisions():
+    """The mention evidence is gated to ids that are themselves a path slice. `x_intro`
+    is derived from a/x.md (so a/x.md defines it and wins the collision) but is not a
+    slice. Both copies are the target of an own-file `references` edge. Applied to every
+    id, that evidence would demote a/x.md's copy and let the shorter label from c.md
+    win. The survivor must be what v8 picks: a/x.md's node (#4281)."""
+    nodes = [_mention_node("x", "X", "a/x.md"),
+             _mention_node("x_intro", "Introduction to X", "a/x.md"),
+             _mention_node("c_doc", "Doc C", "c.md"),
+             _mention_node("x_intro", "Intro", "c.md")]
+    edges = [_mention_edge("x", "x_intro", "a/x.md"),
+             _mention_edge("c_doc", "x_intro", "c.md")]
+    kept, _ = deduplicate_entities(nodes, edges, communities={})
+    survivor = next(n for n in kept if n["id"] == "x_intro")
+    assert (survivor["label"], survivor["source_file"]) == ("Introduction to X", "a/x.md")

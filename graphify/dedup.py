@@ -445,7 +445,8 @@ def _rank_path(source_file: str, root: Path | None) -> str:
     return normalized
 
 
-def _collision_rank(node: dict, root: Path | None = None) -> tuple:
+def _collision_rank(node: dict, root: Path | None = None,
+                    mentions: "frozenset | set" = frozenset()) -> tuple:
     """A total order for choosing the survivor of an ID collision, independent of
     the order the colliding nodes arrive in.
 
@@ -458,16 +459,69 @@ def _collision_rank(node: dict, root: Path | None = None) -> tuple:
     in-repo colliders by segments present in both path forms, so absolute and
     repo-relative spellings of the same layout order identically — fully
     deterministic regardless of arrival order (#1851) or checkout location.
+
+    ``mentions`` (see ``_mentions``) holds the ``(id, file)`` of nodes read as a
+    mention of a document rather than the document itself. Such a node ranks as a
+    reference even though its id is a path slice, so a real document outranks it
+    whatever the label lengths are (#4281). The set only ever contains path-slice
+    ids, so the survivor of every other collision is chosen exactly as before.
     """
     label = node.get("label") or ""
     rank_path = _rank_path(node.get("source_file") or "", root)
     return (
-        not _defines_id(node),  # definers (False) sort before references (True)
+        # definers (False) sort before references (True)
+        not _defines_id(node) or (node.get("id"), rank_path) in mentions,
         _lifecycle_penalty(rank_path),  # active paths beat archived ones (#2532)
         len(label),             # shorter, more canonical label first
         label,                  # lexical tiebreak
         tuple(reversed([s for s in rank_path.split("/") if s and s != "."])),
     )
+
+
+def _mentions(nodes: list[dict], edges: list[dict],
+              root: Path | None) -> set[tuple[str, str]]:
+    """``(id, root-relative file)`` of nodes read as a MENTION of a document (#4281).
+
+    A semantic fragment sometimes mints the bare id of a file it only points at:
+    ``protocol`` inside docs/firmware/protocol.md, standing for docs/protocol.md. A
+    node is read as such a mention when both hold:
+
+    - another node of its OWN file points at it with a ``references`` edge whose own
+      source_file is that file, and
+    - its id is itself a path slice of that file (``_id_prefixes``), so it names a
+      document. An entity id such as ``x_intro`` is the target of ordinary intra-file
+      ``references`` edges and never counts.
+
+    ``_path_qualify_dropped_collisions`` and ``_collision_rank`` both read this one
+    set, so a single definition decides whether a mention is renamed and whether it
+    loses a survivor tie.
+
+    Heuristic boundary: this is INFERRED from the edges an LLM chose to emit, not
+    stated by the source. A missing or reversed edge gives no evidence, and the id is
+    then renamed per file like any other. A real document whose own node is linked to
+    its file-level id the same way (an entity named like its file, which
+    ``_doc_twin_remap`` already treats as the file itself) reads as a mention, and
+    that collision collapses exactly as it did before.
+    """
+    def key(sf):
+        return _rank_path(sf, root) if sf and isinstance(sf, str) else ""
+
+    own: dict[str, set[str]] = defaultdict(set)
+    for node in nodes:
+        nid = node.get("id")
+        if nid and isinstance(nid, str):
+            own[key(node.get("source_file"))].add(nid)
+    found: set[tuple[str, str]] = set()
+    for edge in edges:
+        if not isinstance(edge, dict) or edge.get("relation") != "references":
+            continue
+        k = key(edge.get("source_file"))
+        source, target = edge.get("source"), edge.get("target")
+        if (k and isinstance(source, str) and isinstance(target, str)
+                and source != target and source in own[k] and target in own[k]
+                and target in _id_prefixes(k)):
+            found.add((target, k))
+    return found
 
 
 def _same_source_entity(survivor: dict, duplicate: dict) -> bool:
@@ -659,6 +713,17 @@ def _path_qualify_dropped_collisions(
       full stem is the id's shorter prefix (``protocol`` while ``protocol.md``
       exists): that file is the one the bare id names, so the id may be a genuine
       reference to it and stays on the definer-wins collapse-and-warn path;
+    - a node read as a MENTION of a document (``_mentions``: a path-slice id that
+      another node of its own file ``references``) is not a candidate, so it is not
+      renamed onto the mentioning file's own page. That reading is inferred from LLM
+      edges: with a missing or reversed edge the node is renamed like any other, and
+      a collision with a real document whose own node is linked to its file-level id
+      collapses as it did before. If two or more other files also mint the mention's
+      id it cannot be pointed at any one of them, so it stays on the bare id and
+      ``build_from_json`` then folds it into its own file's page;
+    - a top-level file that mints the same id (``protocol.md`` next to
+      ``docs/protocol.md``) is a separate collision this pass does not resolve: the
+      group is skipped and the label tiebreak drops one of the real documents;
     - a reference to the bare id from ANOTHER file cannot be attributed to one
       file, so it is left unresolved (one warning per id) rather than guessed;
     - if the new id is already used by a node of a different file, or two files
@@ -695,18 +760,24 @@ def _path_qualify_dropped_collisions(
         _full_stem(key(n["source_file"])) for n in nodes
         if isinstance(n.get("source_file"), str) and n["source_file"]
     }
+    mentions = _mentions(nodes, edges, root)
     by_id: dict[str, list[dict]] = defaultdict(list)
     owners: dict[str, set[str]] = defaultdict(set)
+    kept_bare: set[tuple[str, str]] = set()
     for node in nodes:
         nid = node.get("id")
         if not nid or not isinstance(nid, str):
             continue
-        owners[nid].add(key(node.get("source_file")))
-        if qualified_id(node):
+        k = key(node.get("source_file"))
+        owners[nid].add(k)
+        if not qualified_id(node):
+            continue
+        if (nid, k) in mentions:
+            kept_bare.add((nid, k))  # stays on the bare id; its own-file edges are fine
+        else:
             by_id[nid].append(node)
 
     renames: dict[tuple[str, str], str] = {}
-    kept_bare: set[tuple[str, str]] = set()
     claimed: dict[str, str] = {}
     for nid in sorted(by_id):
         members = by_id[nid]
@@ -867,6 +938,7 @@ def deduplicate_entities(
     # Genuine cross-file ID collisions stay isolated and are reported below (#1504).
     nodes, edges = _disambiguate_defining_collisions(nodes, edges, hyperedges, root_resolved)
     nodes, edges = _path_qualify_dropped_collisions(nodes, edges, hyperedges, root_resolved)
+    mentions = _mentions(nodes, edges, root_resolved)
     seen_ids: dict[str, dict] = {}
     dropped: dict[str, list[dict]] = defaultdict(list)
     for node in nodes:
@@ -876,7 +948,8 @@ def deduplicate_entities(
         incumbent = seen_ids.get(nid)
         if incumbent is None:
             seen_ids[nid] = node
-        elif _collision_rank(node, root_resolved) < _collision_rank(incumbent, root_resolved):
+        elif (_collision_rank(node, root_resolved, mentions)
+              < _collision_rank(incumbent, root_resolved, mentions)):
             # Smallest-ranked node wins; the min over a total order is independent
             # of the order nodes arrive in, so the survivor no longer depends on
             # chunk ordering (#1851).
@@ -894,7 +967,7 @@ def deduplicate_entities(
         survivor = seen_ids[nid]
         same_source = sorted(
             (l for l in losers if _same_source_entity(survivor, l)),
-            key=lambda l: _collision_rank(l, root_resolved),
+            key=lambda l: _collision_rank(l, root_resolved, mentions),
         )
         for loser in same_source:
             survivor = _merge_missing_attributes(survivor, loser)
