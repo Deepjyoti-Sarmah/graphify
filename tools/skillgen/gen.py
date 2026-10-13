@@ -1224,10 +1224,11 @@ def _is_step1_root_marker_fix_line(line: str) -> bool:
         stripped.startswith('"$PYTHON" -c "import os, sys; out_path = os.path.abspath(\'graphify-out/.graphify_root\')')
         or stripped in ("INPUT_PATH", "GRAPHIFY_ROOT_EOF")
         or stripped == "# Save scan root so `graphify update` (no args) knows where to look next time."
-        or stripped == "# The scan path is passed through a quoted heredoc, never substituted into the"
-        or stripped == "# command line itself: a bare `cd <path>` (or an unquoted heredoc, which"
-        or stripped == "# still expands $()/backticks in its body) would let a malicious path execute"
-        or stripped == "# as shell code the moment this line runs."
+        or stripped == "# The shell never expands the scan path: it goes through a quoted heredoc, not the"
+        or stripped == "# command line. A path with a line break is refused, because it could end the"
+        or stripped == "# heredoc early and run the lines after it as shell; the Python below also"
+        or stripped == "# rejects input of more than one line."
+        or stripped == "If the scan path contains a line break (a newline or carriage return), stop and ask the user for a different path. Do not run the block below: a path line could end the heredoc early and run the lines after it as shell."
     )
 
 
