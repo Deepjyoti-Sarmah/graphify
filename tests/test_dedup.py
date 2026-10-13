@@ -1604,10 +1604,8 @@ def test_bare_id_across_different_paths_is_path_qualified(capsys):
     assert "minted by two different files" not in capsys.readouterr().err
 
 
-def test_bare_id_naming_an_existing_file_is_not_renamed(capsys):
-    """`protocol.md` exists, so a bare `protocol` may be a genuine reference to it:
-    the group is not path-qualified and takes the definer-wins collapse path."""
-    nodes = [
+def _three_bare_protocols():
+    return [
         {"id": "protocol", "label": "protocol", "file_type": "document",
          "source_file": "protocol.md"},
         {"id": "protocol", "label": "protocol (docs)", "file_type": "document",
@@ -1615,9 +1613,19 @@ def test_bare_id_naming_an_existing_file_is_not_renamed(capsys):
         {"id": "protocol", "label": "protocol (firmware)", "file_type": "document",
          "source_file": "docs/firmware/protocol.md"},
     ]
-    result_nodes, _ = deduplicate_entities(nodes, [], communities={})
-    assert [(n["id"], n["source_file"]) for n in result_nodes] == [("protocol", "protocol.md")]
-    assert "WARNING" in capsys.readouterr().err
+
+
+def test_bare_ids_in_three_files_keep_one_node_per_file(capsys):
+    """protocol.md exists and the other two files each have only a bare `protocol`.
+    Neither has a page of its own, so the bare id is their page: protocol.md keeps
+    `protocol` and the others are path-qualified. Nothing is dropped (#4281)."""
+    result_nodes, _ = deduplicate_entities(_three_bare_protocols(), [], communities={})
+    assert {(n["id"], n["source_file"]) for n in result_nodes} == {
+        ("protocol", "protocol.md"),
+        ("docs_protocol", "docs/protocol.md"),
+        ("docs_firmware_protocol", "docs/firmware/protocol.md"),
+    }
+    assert "minted by two different files" not in capsys.readouterr().err
 
 
 def test_build_with_absolute_edge_paths_moves_edges_to_renamed_node(tmp_path):
@@ -1961,17 +1969,100 @@ def test_mention_without_an_edge_gives_the_same_two_documents():
     assert list(G.edges) == []
 
 
-def test_top_level_collision_keeps_todays_result():
-    """Case R_toplevel. KNOWN LIMITATION, pinned so a change is noticed: with a
-    top-level protocol.md that also mints `protocol`, the three files collide and the
-    label tiebreak drops the top-level document's node. This is a separate genuine
-    collision from the mention rule and is not fixed here (#4281)."""
+def test_top_level_file_keeps_its_own_node_next_to_dropped_folder_docs():
+    """Case R_toplevel. protocol.md, docs/protocol.md and docs/firmware/protocol.md
+    all mint `protocol`. Each file keeps its own node, and the firmware reference
+    lands on the top-level `protocol` node (#4281)."""
     from graphify.build import build
 
     G = build([_protocol_reference_input(top_level=True)])
-    assert sorted(G.nodes) == ["docs_firmware_protocol", "docs_protocol"]
+    assert sorted(G.nodes) == ["docs_firmware_protocol", "docs_protocol", "protocol"]
     assert {frozenset(e) for e in G.edges} == {
-        frozenset(("docs_firmware_protocol", "docs_protocol"))}
+        frozenset(("docs_firmware_protocol", "protocol"))}
+
+
+def _reference_to_top_level(*, edge=True, docs_label="protocol", top_label="Protocol"):
+    docs = "docs/protocol.md"
+    nodes = [_mention_node("docs_protocol", "Docs protocol", docs),
+             _mention_node("protocol", docs_label, docs),
+             _mention_node("protocol", top_label, "protocol.md")]
+    edges = [_mention_edge("docs_protocol", "protocol", docs)] if edge else []
+    return nodes, edges
+
+
+def test_genuine_reference_to_top_level_file_still_collapses():
+    """docs/protocol.md has its own `docs_protocol` page and a `protocol` it
+    references. That bare id is the top-level file, not a second page of docs/:
+    it collapses onto protocol.md's node and the edge ends there (#4281)."""
+    nodes, edges = _reference_to_top_level()
+    kept, kept_edges = deduplicate_entities(nodes, edges, communities={})
+    assert {(n["id"], n["source_file"]) for n in kept} == {
+        ("docs_protocol", "docs/protocol.md"), ("protocol", "protocol.md")}
+    assert [(e["source"], e["target"]) for e in kept_edges] == [("docs_protocol", "protocol")]
+
+
+def test_reference_to_top_level_file_without_an_edge_still_collapses():
+    """Same input with no `references` edge: the docs `protocol` still collapses
+    into protocol.md's node, because docs/protocol.md has its own page (#4281)."""
+    nodes, edges = _reference_to_top_level(edge=False)
+    kept, kept_edges = deduplicate_entities(nodes, edges, communities={})
+    assert {(n["id"], n["source_file"]) for n in kept} == {
+        ("docs_protocol", "docs/protocol.md"), ("protocol", "protocol.md")}
+    assert kept_edges == []
+
+
+def test_top_level_file_survives_whatever_the_labels_are():
+    """Case R_toplevel, label-swap. The bare `protocol` from docs/protocol.md has the
+    SHORTER label. docs/protocol.md has its own page, so that node is a reference and
+    protocol.md's node survives; the docs_protocol edge ends on it (#4281)."""
+    nodes, edges = _reference_to_top_level(docs_label="Protocol", top_label="Protocol (top-level)")
+    kept, kept_edges = deduplicate_entities(nodes, edges, communities={})
+    assert {(n["id"], n["label"], n["source_file"]) for n in kept} == {
+        ("docs_protocol", "Docs protocol", "docs/protocol.md"),
+        ("protocol", "Protocol (top-level)", "protocol.md")}
+    assert [(e["source"], e["target"]) for e in kept_edges] == [("docs_protocol", "protocol")]
+
+
+def test_top_level_file_survives_without_a_references_edge():
+    """Same label-swap input with no `references` edge, so `_mentions` has no
+    evidence. The ranking alone must keep protocol.md's node: a bare slice from a
+    file that has its own page is a reference, whatever the labels (#4281)."""
+    nodes, _ = _reference_to_top_level(edge=False, docs_label="Protocol",
+                                       top_label="Protocol (top-level)")
+    for order in (nodes, list(reversed(nodes))):
+        kept, _ = deduplicate_entities([dict(n) for n in order], [], communities={})
+        survivor = next(n for n in kept if n["id"] == "protocol")
+        assert (survivor["label"], survivor["source_file"]) == ("Protocol (top-level)", "protocol.md")
+
+
+def test_top_level_collision_result_does_not_depend_on_input_order():
+    """The three-file case fed in reverse order keeps the same nodes (#4281)."""
+    nodes = _three_bare_protocols()
+    fwd, _ = deduplicate_entities([dict(n) for n in nodes], [], communities={})
+    rev, _ = deduplicate_entities([dict(n) for n in reversed(nodes)], [], communities={})
+    assert {(n["id"], n["source_file"]) for n in fwd} == {
+        (n["id"], n["source_file"]) for n in rev}
+
+
+def test_dropped_folder_doc_with_own_stem_entity_falls_back_to_collapse():
+    """KNOWN BOUNDARY, pinned so a change is noticed. docs/protocol.md emits `protocol`
+    AND `docs_protocol_header` (an entity spelled with its full stem), so the file
+    counts as having its own page and the bare id may be a reference. It collapses
+    into protocol.md's node, as before this change (#4281)."""
+    nodes = [_mention_node("protocol", "protocol", "docs/protocol.md"),
+             _mention_node("docs_protocol_header", "Header", "docs/protocol.md"),
+             _mention_node("protocol", "Protocol", "protocol.md")]
+    kept, _ = deduplicate_entities(nodes, [], communities={})
+    assert {(n["id"], n["source_file"]) for n in kept} == {
+        ("docs_protocol_header", "docs/protocol.md"), ("protocol", "protocol.md")}
+
+
+def test_lone_bare_id_without_a_top_level_file_is_left_to_build():
+    """A single `protocol` from docs/protocol.md and no protocol.md anywhere: this
+    pass does not act, the id stays `protocol` for build's remap (#4281)."""
+    nodes = [_mention_node("protocol", "Protocol", "docs/protocol.md")]
+    kept, _ = deduplicate_entities(nodes, [], communities={})
+    assert [n["id"] for n in kept] == ["protocol"]
 
 
 def test_entity_described_in_two_documents_collapses_to_one_node(capsys):

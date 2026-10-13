@@ -464,7 +464,10 @@ def _collision_rank(node: dict, root: Path | None = None,
     mention of a document rather than the document itself. Such a node ranks as a
     reference even though its id is a path slice, so a real document outranks it
     whatever the label lengths are (#4281). The set only ever contains path-slice
-    ids, so the survivor of every other collision is chosen exactly as before.
+    ids, so the survivor of every other collision is chosen exactly as before. It
+    also holds a shorter path-slice id from a file that has its own page
+    (``_slice_references``), so a bare ``protocol`` inside docs/protocol.md cannot
+    outrank the real top-level protocol.md on label length.
     """
     label = node.get("label") or ""
     rank_path = _rank_path(node.get("source_file") or "", root)
@@ -521,6 +524,43 @@ def _mentions(nodes: list[dict], edges: list[dict],
                 and source != target and source in own[k] and target in own[k]
                 and target in _id_prefixes(k)):
             found.add((target, k))
+    return found
+
+
+def _own_page_files(nodes: list[dict], root: Path | None) -> set[str]:
+    """Root-relative files that have a node spelled with their own full stem (#4281).
+
+    Such a file already has its page, so a shorter path-slice id it also mints
+    (``protocol`` inside docs/protocol.md, next to ``docs_protocol``) may be a
+    reference to another file rather than that file's own page."""
+    from graphify.build import _is_abs  # local: build imports dedup
+
+    files: set[str] = set()
+    for node in nodes:
+        nid, sf = node.get("id"), node.get("source_file")
+        if not nid or not isinstance(nid, str) or not sf or not isinstance(sf, str):
+            continue
+        k = _rank_path(sf, root)
+        if _is_abs(k):
+            continue
+        full = _full_stem(k)
+        if nid == full or nid.startswith(f"{full}_"):
+            files.add(k)
+    return files
+
+
+def _slice_references(nodes: list[dict], root: Path | None) -> set[tuple[str, str]]:
+    """``(id, file)`` of nodes whose id is a SHORTER path slice of a file that has its
+    own page (#4281). They rank as references, like a ``_mentions`` entry."""
+    own_page = _own_page_files(nodes, root)
+    found: set[tuple[str, str]] = set()
+    for node in nodes:
+        nid, sf = node.get("id"), node.get("source_file")
+        if not nid or not isinstance(nid, str) or not sf or not isinstance(sf, str):
+            continue
+        k = _rank_path(sf, root)
+        if k in own_page and nid in _id_prefixes(k) and nid != _full_stem(k):
+            found.add((nid, k))
     return found
 
 
@@ -709,10 +749,6 @@ def _path_qualify_dropped_collisions(
       location cannot leak into an id;
     - a group acts only when its files have at least two distinct full stems; a
       lone candidate is left to ``build_from_json``'s semantic id remap;
-    - a group is skipped when ANY node in the input comes from the file whose
-      full stem is the id's shorter prefix (``protocol`` while ``protocol.md``
-      exists): that file is the one the bare id names, so the id may be a genuine
-      reference to it and stays on the definer-wins collapse-and-warn path;
     - a node read as a MENTION of a document (``_mentions``: a path-slice id that
       another node of its own file ``references``) is not a candidate, so it is not
       renamed onto the mentioning file's own page. That reading is inferred from LLM
@@ -721,9 +757,15 @@ def _path_qualify_dropped_collisions(
       collapses as it did before. If two or more other files also mint the mention's
       id it cannot be pointed at any one of them, so it stays on the bare id and
       ``build_from_json`` then folds it into its own file's page;
-    - a top-level file that mints the same id (``protocol.md`` next to
-      ``docs/protocol.md``) is a separate collision this pass does not resolve: the
-      group is skipped and the label tiebreak drops one of the real documents;
+    - a file whose full stem IS the id (``protocol.md`` for ``protocol``) defines it,
+      keeps the bare id, and counts toward the collision, so ``docs/protocol.md``
+      next to it is still renamed. A candidate whose bare id names another input
+      file is renamed only if its own file has no other node spelled with its own
+      full stem. If it has one (``docs_protocol`` next to ``protocol``), the bare id
+      may be a reference, so it stays on the definer-wins collapse-and-warn path as
+      before. Known boundary: when the LLM drops the folder AND also emits another
+      node spelled with the file's full stem, the file counts as having its own page
+      and falls back to the collapse it got before this change (#4281);
     - a reference to the bare id from ANOTHER file cannot be attributed to one
       file, so it is left unresolved (one warning per id) rather than guessed;
     - if the new id is already used by a node of a different file, or two files
@@ -777,19 +819,31 @@ def _path_qualify_dropped_collisions(
         else:
             by_id[nid].append(node)
 
+    # Files with a node spelled with their own full stem: their page already exists,
+    # so a shorter-prefix id from such a file may be a reference to another file.
+    own_page = _own_page_files(nodes, root)
+
     renames: dict[tuple[str, str], str] = {}
     claimed: dict[str, str] = {}
     for nid in sorted(by_id):
         members = by_id[nid]
-        if len({key(m["source_file"]) for m in members}) < 2:
+        # The file whose full stem IS the id defines it; it keeps the bare id and
+        # counts toward the collision even though it is not a candidate.
+        definers = {o for o in owners[nid] if o and not _is_abs(o) and _full_stem(o) == nid}
+        files = {key(m["source_file"]) for m in members} | definers
+        if len(files) < 2:
             continue
-        if len({_full_stem(key(m["source_file"])) for m in members}) < 2:
-            continue
-        if any((qualified_id(m) or ("", ""))[1] in named_files for m in members):
+        if len({_full_stem(f) for f in files}) < 2:
             continue
         for m in sorted(members, key=lambda m: key(m["source_file"])):
             k = key(m["source_file"])
             if (nid, k) in renames or (nid, k) in kept_bare:
+                continue
+            # The bare id names another input file (``protocol`` while protocol.md
+            # exists). It is this file's own page only if the file has no other
+            # page node; otherwise it may be a reference, so leave it to collapse.
+            if (qualified_id(m) or ("", ""))[1] in named_files and k in own_page:
+                kept_bare.add((nid, k))
                 continue
             qualified = qualified_id(m)
             new_id = qualified[0] if qualified else None
@@ -938,7 +992,7 @@ def deduplicate_entities(
     # Genuine cross-file ID collisions stay isolated and are reported below (#1504).
     nodes, edges = _disambiguate_defining_collisions(nodes, edges, hyperedges, root_resolved)
     nodes, edges = _path_qualify_dropped_collisions(nodes, edges, hyperedges, root_resolved)
-    mentions = _mentions(nodes, edges, root_resolved)
+    mentions = _mentions(nodes, edges, root_resolved) | _slice_references(nodes, root_resolved)
     seen_ids: dict[str, dict] = {}
     dropped: dict[str, list[dict]] = defaultdict(list)
     for node in nodes:
