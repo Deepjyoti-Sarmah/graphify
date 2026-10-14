@@ -107,7 +107,7 @@ deleted = list(incremental.get('deleted_files', []))
 # prune_sources is ONLY for genuinely DELETED files. Changed/re-extracted files are
 # handled by build_merge's replace-on-re-extract (#1344): every source_file in
 # new_chunks is dropped from the base before merge, so old/stale nodes don't survive.
-# Do NOT add `changed` here: with root= passed, prune_set relativizes to the same base
+# Do NOT add changed here: with root= passed, prune_set relativizes to the same base
 # as the freshly merged nodes and would DELETE the re-extracted content (#1178 is moot
 # now that replace — not the dedup pass — reconciles changed files).
 prune = list(deleted) or None

@@ -1269,7 +1269,7 @@ def _is_semantic_origin_stamp_fix_line(line: str) -> bool:
         or "_origin when present and otherwise guesses from the SHAPE of" in line
         or "source_location ('L<line>' means AST). A subagent that writes 'L12' for a" in line
         or "doc section therefore made that node read as AST, and the next" in line
-        or "`graphify update` deleted it along with the re-extracted code file it" in line
+        or "graphify update deleted it along with the re-extracted code file it" in line
         or "seemed to belong to (#2843). extract() stamps its own items 'ast'; the" in line
         or "semantic side must say so explicitly." in line
     )
