@@ -9442,6 +9442,10 @@ def extract(
     # subagents generate (#1033). Resolve before relativizing so paths passed in
     # relative form still anchor to the (resolved) root.
     id_remap: dict[str, str] = {}
+    # Input files that minted each old file-level id key (resolved paths) (#4449). A key
+    # names its owner's file node; a symbol of ANOTHER file that merely spells the same
+    # string (``const sql`` in x.mjs next to x.sql) must not follow it.
+    id_owner: dict[str, set[Path]] = {}
     # A target OUTSIDE the scan root (an out-of-root ProjectReference/.sln/bash
     # `source`/#include/relative import) can't be made relative to root; leaving
     # it absolute leaked the scan path including the OS username into a
@@ -9598,6 +9602,7 @@ def extract(
         new_id = _file_node_id(rel)
         if old_id != new_id:
             id_remap[old_id] = new_id
+            id_owner.setdefault(old_id, set()).add(_resolved(path))
         # Also register the absolute-resolved form of the file-level id so
         # alias/workspace import targets (resolved via .resolve()) remap to
         # canonical instead of orphaning (#1529).
@@ -9605,6 +9610,7 @@ def extract(
         old_id_abs = _make_id(str(path_abs))
         if old_id_abs != new_id:
             id_remap[old_id_abs] = new_id
+            id_owner.setdefault(old_id_abs, set()).add(path_abs)
         old_prefs: list[tuple[str, str]] = []
         old_pref = _file_node_id(path)
         if old_pref != new_id:
@@ -9634,15 +9640,50 @@ def extract(
         stem_forms[path_abs] = (
             new_id, [old_pref_abs, old_pref, new_id]
         )
+    # A key is contested when a node of a different file carries it as one of that
+    # file's OWN symbol ids (id starts with a stem prefix of its file). ``held`` lists
+    # the files that carry such a node. Every other key renames exactly as before
+    # (#1529, #2169, #2243) (#4449).
+    contested: set[str] = set()
+    held: dict[str, set[Path]] = {}
+    for _n in all_nodes:
+        _k, _sf = _n.get("id"), _n.get("source_file")
+        if _k in id_remap and _k in id_owner and _sf and _resolved(_sf) not in id_owner[_k]:
+            _forms = stem_forms.get(_resolved(_sf))
+            if _forms and any(_k.startswith(_f + "_") for _f in _forms[1]):
+                contested.add(_k)
+                held.setdefault(_k, set()).add(_resolved(_sf))
+
+    def _remapped(nid, owner_sf):
+        """id_remap[nid], or None to keep nid. A contested key stays on an item whose
+        file holds its own node with that id and did not mint the key; everything else
+        (the owner's file, or a file that only REFERS to the owner) renames as before."""
+        new = id_remap.get(nid)
+        if new is None or nid not in contested:
+            return new
+        try:
+            if not owner_sf:
+                return new
+            f = _resolved(owner_sf)
+            if f in id_owner[nid]:
+                return new
+            return None if f in held[nid] else new
+        except (OSError, RuntimeError):
+            return new
+
     if id_remap:
         for n in all_nodes:
-            if n.get("id") in id_remap:
-                n["id"] = id_remap[n["id"]]
+            _new = _remapped(n.get("id"), n.get("source_file"))
+            if _new is not None:
+                n["id"] = _new
         for e in all_edges:
-            if e.get("source") in id_remap:
-                e["source"] = id_remap[e["source"]]
-            if e.get("target") in id_remap:
-                e["target"] = id_remap[e["target"]]
+            _sf = e.get("source_file")
+            _new = _remapped(e.get("source"), _sf)
+            if _new is not None:
+                e["source"] = _new
+            _new = _remapped(e.get("target"), e.get("target_file") or _sf)
+            if _new is not None:
+                e["target"] = _new
         # raw_calls carry caller_nid, consumed by the cross-file call pass far
         # below (after this remap). A module-TOP-LEVEL indirect_call/callback
         # records the FILE-level id as its caller — the id minted from the
@@ -9652,23 +9693,29 @@ def extract(
         # source and matches no node in the graph (#2231). Mirrors the
         # sym_remap raw_calls rewrite in the prefix pass below.
         for rc in all_raw_calls:
-            cn = rc.get("caller_nid")
-            if cn in id_remap:
-                rc["caller_nid"] = id_remap[cn]
+            _new = _remapped(rc.get("caller_nid"), rc.get("source_file"))
+            if _new is not None:
+                rc["caller_nid"] = _new
         # swift_extensions[].nid is the same kind of id carrier as caller_nid
         # above (cache.py remaps both), consumed by _merge_swift_extensions far
         # below. Left stale it matches no node, so whether the extension merge
         # runs at all depends on the FORM of the paths handed to extract() —
         # relative input already yields the post-remap slug, absolute input does
         # not (#2538). Remap it here so both agree.
-        for result in per_file:
+        for _path, result in zip(paths, per_file):
             for ext in result.get("swift_extensions", []) or []:
-                en = ext.get("nid")
-                if en in id_remap:
-                    ext["nid"] = id_remap[en]
+                _new = _remapped(ext.get("nid"), _path)
+                if _new is not None:
+                    ext["nid"] = _new
         # objc_field_types["tables"] is keyed BY class node id - the one bucket
         # the #1529 rewrites missed (#3150).
-        _remap_objc_field_tables(per_file, id_remap)
+        if contested:
+            for _path, result in zip(paths, per_file):
+                _remap_objc_field_tables(
+                    [result], {k: v for k, v in id_remap.items()
+                               if k not in contested or _remapped(k, _path) is not None})
+        else:
+            _remap_objc_field_tables(per_file, id_remap)
     if prefix_remap:
         sym_remap: dict[str, str] = {}
         edge_alias_candidates: dict[str, set[str]] = {}
