@@ -205,7 +205,7 @@ if cached_nodes or cached_edges or cached_hyperedges:
 else:
     Path('graphify-out/.graphify_cached.json').unlink(missing_ok=True)
 Path('graphify-out/.graphify_uncached.txt').write_text('\n'.join(uncached), encoding=\"utf-8\")
-# One `path<TAB>stem` line per uncached file, same order: the subagents copy the stem
+# One path<TAB>stem line per uncached file, same order: the subagents copy the stem
 # instead of guessing it (#4432). Computed here in code, never pasted.
 from graphify.extractors.base import file_id_stem
 Path('graphify-out/.graphify_uncached_stems.txt').write_text('\n'.join(f'{f}{chr(9)}{file_id_stem(f, root)}' for f in uncached), encoding=\"utf-8\")
