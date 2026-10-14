@@ -234,7 +234,15 @@ else:
 
 #### Part B - Semantic extraction (parallel subagents)
 
-**Fast path:** If detection found zero docs, papers, and images (code-only corpus), skip Part B entirely and go straight to Part C. AST handles code - there is nothing for semantic subagents to do.
+**Fast path:** If detection found zero docs, papers, and images (code-only corpus), skip Part B entirely and go straight to Part C. AST handles code - there is nothing for semantic subagents to do. **First write an empty semantic file** so Part C's merge has its input (it reads `graphify-out/.graphify_semantic.json` unconditionally; without this a code-only run hits `FileNotFoundError`):
+
+```bash
+$(cat graphify-out/.graphify_python) -c "
+import json
+from pathlib import Path
+Path('graphify-out/.graphify_semantic.json').write_text(json.dumps({'nodes':[],'edges':[],'hyperedges':[],'input_tokens':0,'output_tokens':0}), encoding='utf-8')
+"
+```
 
 Before dispatching subagents, print a timing estimate:
 - Load `total_words` and file counts from `graphify-out/.graphify_detect.json`
@@ -960,7 +968,7 @@ print('code_only:', code_only)
 "
 ```
 
-If `code_only` is True: print `[graphify update] Code-only changes detected - skipping semantic extraction (no LLM needed)`, run only Step 3A (AST) on the changed files, skip Step 3B entirely (no subagents), then go straight to merge and Steps 4-8.
+If `code_only` is True: print `[graphify update] Code-only changes detected - skipping semantic extraction (no LLM needed)`, run Step 3A (AST) on the changed files, then run the Part B fast path to write an empty `.graphify_semantic.json`, then run Part C, which builds `.graphify_extract.json` from the new AST result. Do not dispatch subagents or read the semantic cache. Then go on to the merge and Steps 4-8.
 
 If `code_only` is False (any changed file is a doc/paper/image): run the full Steps 3A-3C pipeline as normal.
 

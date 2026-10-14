@@ -1275,6 +1275,41 @@ def _is_semantic_origin_stamp_fix_line(line: str) -> bool:
     )
 
 
+def _is_code_only_fast_path_fix_line(line: str) -> bool:
+    """Whether a line is part of the aider/devin code-only runbook fix (#4447).
+
+    In the two monoliths the Part B fast path was prose only, so Part C's
+    unconditional read of ``.graphify_semantic.json`` raised FileNotFoundError on
+    a code-only build or ``--update``, and the code-only paragraph never named
+    Part C. The fast path now writes an empty semantic file first, the paragraph
+    names Step 3A, the fast path, Part C and then the merge, and aider's
+    only-deletions guard writes the ``.graphify_extract.json`` its merge reads.
+    The first group below is the shell of the added fast-path block (it matches
+    any single copy of those lines); the rest are the old and new lines.
+    """
+    s = line.strip()
+    return (
+        s in (
+            "```",
+            "```bash",
+            'import json',
+            'from pathlib import Path',
+            '"',
+            '$(cat graphify-out/.graphify_python) -c "',
+            "if [ ! -f .graphify_extract.json ]; then",
+            "if [ ! -f graphify-out/.graphify_extract.json ]; then",
+        )
+        or (s.startswith("**Fast path:** If detection found zero docs") and (
+            "**First write an empty semantic file**" in s
+            or s.endswith("there is nothing for semantic subagents to do.")))
+        or (s.startswith("If `code_only` is True: print `[graphify update] Code-only changes detected") and (
+            "run Step 3A (AST) on the changed files, then run the Part B fast path" in s
+            or "run only Step 3A (AST) on the changed files, skip Step 3B entirely" in s))
+        or (s.startswith("Path(") and ".graphify_semantic.json').write_text(json.dumps({'nodes':[],'edges':[],'hyperedges':[]" in s)
+        or (s.startswith("Path(") and ".graphify_extract.json').write_text(json.dumps({'nodes':[],'edges':[],'hyperedges':[]" in s)
+    )
+
+
 # Every line that may differ between a rendered monolith and its pristine v8
 # baseline. Each predicate documents one sanctioned change-class; a blank line is
 # allowed because the multi-line fix blocks insert spacing. Anything else failing
@@ -1302,6 +1337,7 @@ _SANCTIONED_MONOLITH_DIFFS = (
     _is_persisted_scan_options_fix_line,
     _is_worktree_visibility_note_line,
     _is_semantic_origin_stamp_fix_line,
+    _is_code_only_fast_path_fix_line,
 )
 
 
