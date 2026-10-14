@@ -9,8 +9,7 @@ which is the bug (Part A writes only ``.graphify_ast.json``; the merge reads
 
 Hosts: the 14 generated skills share one set of anchors (windows runs its PowerShell
 here-string bodies through the interpreter on stdin: it tests the Python and the step order,
-not PowerShell quoting). aider and devin are monoliths with their own anchors; neither update
-section writes ``.graphify_detect.json``, so the test seeds it for them.
+not PowerShell quoting). aider and devin are monoliths with their own anchors.
 """
 from __future__ import annotations
 
@@ -221,16 +220,8 @@ def test_code_only_update_follows_its_paragraph_and_merges_the_new_function(host
         ran.append(result.stdout)
     assert any("code_only: True" in text for text in ran), "the code_only check did not report True"
 
-    detect = out / ".graphify_detect.json"
-    if not detect.exists():
-        # aider and devin only: no block in their --update section writes it (a defect separate
-        # from #4447). Seed what the shared block writes so this test isolates the extraction route.
-        assert host in ("aider", "devin"), f"{host}: the update section never wrote .graphify_detect.json"
-        inc = json.loads((out / ".graphify_incremental.json").read_text(encoding="utf-8"))
-        detect.write_text(json.dumps({
-            "files": inc["new_files"], "all_files": inc.get("files", {}), "total_files": inc["new_total"],
-            "total_words": inc.get("total_words", 0), "skipped_sensitive": [], "needs_graph": True,
-        }), encoding="utf-8")
+    # Part A reads it, and Step 9 deleted it: the --update section has to write it again.
+    assert (out / ".graphify_detect.json").exists(), "the --update section never wrote .graphify_detect.json"
 
     # A sidecar left by an earlier run, where this host keeps it: must not reach the result.
     (out / ".graphify_semantic.json").write_text(json.dumps({

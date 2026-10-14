@@ -1310,6 +1310,31 @@ def _is_code_only_fast_path_fix_line(line: str) -> bool:
     )
 
 
+def _is_update_detect_populate_fix_line(line: str) -> bool:
+    """Whether a line is part of the aider/devin ``--update`` detect block (found while fixing #4447).
+
+    Part A reads ``.graphify_detect.json``, Step 9 deletes it, and the monoliths'
+    ``--update`` section never wrote it again, so Part A raised FileNotFoundError.
+    The section now writes it from ``.graphify_incremental.json``, as the generated
+    ``references/update.md`` does. These are the lead-in sentence and the block's lines.
+    """
+    s = line.strip()
+    return (
+        s.startswith("Then populate `.graphify_detect.json` so Steps 3A")
+        or (s.startswith("r = json.loads(Path(") and s.endswith(".graphify_incremental.json').read_text())"))
+        or (s.startswith("Path(") and s.endswith(".graphify_detect.json').write_text(json.dumps({"))
+        or s in (
+            "'files': r.get('new_files', {}),",
+            "'all_files': r.get('files', {}),",
+            "'total_files': r.get('new_total', 0),",
+            "'total_words': r.get('total_words', 0),",
+            "'skipped_sensitive': r.get('skipped_sensitive', []),",
+            "'needs_graph': True,",
+            "}))",
+        )
+    )
+
+
 # Every line that may differ between a rendered monolith and its pristine v8
 # baseline. Each predicate documents one sanctioned change-class; a blank line is
 # allowed because the multi-line fix blocks insert spacing. Anything else failing
@@ -1338,6 +1363,7 @@ _SANCTIONED_MONOLITH_DIFFS = (
     _is_worktree_visibility_note_line,
     _is_semantic_origin_stamp_fix_line,
     _is_code_only_fast_path_fix_line,
+    _is_update_detect_populate_fix_line,
 )
 
 
