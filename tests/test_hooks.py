@@ -1656,6 +1656,46 @@ def test_commit_hook_skips_graph_only_commit_when_graphify_out_is_renamed(tmp_pa
 
 
 @_SH_ONLY
+def test_post_merge_hook_runs_after_a_real_merge(tmp_path):
+    # git writes MERGE_HEAD before running post-merge and deletes it only
+    # after, so a MERGE_HEAD guard here exited on every non-fast-forward
+    # merge and the rebuild never launched (#4463).
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path),  # keeps the rebuild log out of the real ~/.cache
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t.co",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t.co",
+    }
+    quiet = {**env, "GRAPHIFY_SKIP_HOOK": "1"}  # no rebuilds during setup
+
+    def git(*args, env=env):
+        return subprocess.run(["git", *args], cwd=repo, env=env,
+                              capture_output=True, text=True, check=True)
+
+    git("init", "-q", "-b", "main")
+    (repo / "graphify-out").mkdir()
+    (repo / "graphify-out" / "graph.json").write_text("{}", encoding="utf-8")
+    (repo / "a.py").write_text("def a(): pass\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-qm", "init", env=quiet)
+    install(repo)
+    git("checkout", "-qb", "feat", env=quiet)
+    (repo / "b.py").write_text("def b(): pass\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-qm", "b", env=quiet)
+    git("checkout", "-q", "main", env=quiet)
+
+    out = git("merge", "--no-ff", "-m", "merge feat", "feat")
+
+    assert _LAUNCH_LINE in out.stdout + out.stderr, (
+        "post-merge exited before the launch\n"
+        f"stdout={out.stdout!r}\nstderr={out.stderr!r}"
+    )
+
+
+@_SH_ONLY
 def test_commit_hook_skips_graph_only_commit_under_default_dir(tmp_path):
     """Control: the default-name case the filter always handled keeps working."""
     repo = _repo_with_graph_only_commit(tmp_path, "graphify-out")

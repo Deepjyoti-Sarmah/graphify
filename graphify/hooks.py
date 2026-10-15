@@ -583,16 +583,15 @@ if [ ! -d "graphify-out" ]; then
     exit 0
 fi
 
-# This hook only fires after a merge completed cleanly, so MERGE_HEAD is
-# already gone by the time it runs -- these checks are belt and braces for
-# any git version/workflow quirk that lands here mid rebase or cherry-pick
-# anyway, matching the commit and checkout hooks' own defensive posture.
+# git leaves MERGE_HEAD on disk while post-merge runs and deletes it only
+# after the hook returns, so it must not be checked here: that skipped every
+# merge that makes a merge commit (#4463). The checks below are belt and
+# braces for any quirk that lands here mid rebase or cherry-pick.
 # git exports GIT_DIR to hooks; the rev-parse fallback only runs when invoked
 # by hand (each git exec costs 1s+ on AV-scanned Windows machines).
 GIT_DIR=${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}
 [ -d "$GIT_DIR/rebase-merge" ] && exit 0
 [ -d "$GIT_DIR/rebase-apply" ] && exit 0
-[ -f "$GIT_DIR/MERGE_HEAD" ] && exit 0
 [ -f "$GIT_DIR/CHERRY_PICK_HEAD" ] && exit 0
 
 # Honor the same opt out the commit and checkout hooks already respect.
