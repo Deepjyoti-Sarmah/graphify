@@ -13,7 +13,7 @@ import graphify.__main__ as mainmod
 from graphify.affected import format_affected
 from graphify.benchmark import _query_subgraph_tokens
 from graphify.cli import EXIT_AMBIGUOUS, EXIT_NOT_FOUND
-from graphify.serve import _load_graph, _query_graph_text
+from graphify.serve import _load_graph, _query_graph_text, _resolve_single_node
 
 
 def _node(nid, label, source, loc, community=0):
@@ -38,10 +38,11 @@ _LINKS = [
 ]
 
 
-def _write_graph(tmp_path, nodes=None, reverse=False, name="graph.json"):
+def _write_graph(tmp_path, nodes=None, reverse=False, name="graph.json", links=None):
     nodes = list(nodes if nodes is not None else _nodes())
     graph = {"directed": False, "multigraph": False, "graph": {},
-             "nodes": list(reversed(nodes)) if reverse else nodes, "links": _LINKS}
+             "nodes": list(reversed(nodes)) if reverse else nodes,
+             "links": _LINKS if links is None else links}
     path = tmp_path / name
     path.write_text(json.dumps(graph))
     return path
@@ -171,3 +172,68 @@ def test_affected_answers_an_ambiguous_label_exactly_as_before(tmp_path):
     """`resolve_seed` is shared with `affected` and must not change: still no unique match, no refusal text."""
     G = _load_graph(str(_write_graph(tmp_path)))
     assert format_affected(G, "Response") == "No unique node match for Response"
+
+
+# --- the same relative path in two repos of a merged graph (#4512) ---
+
+def _dup_nodes():
+    """`dup.py` exists in both repos. A merged graph keeps `source_file` bare and tells the repos apart
+    only by the node id and the `repo` attribute."""
+    return [
+        {**_node("web::dup_config", "Config", "dup.py", "L1", 0), "repo": "web"},
+        {**_node("ml::dup_config", "Config", "dup.py", "L1", 1), "repo": "ml"},
+    ]
+
+
+def _dup_graph(tmp_path):
+    return _write_graph(tmp_path, _dup_nodes(), links=[])
+
+
+def test_query_refuses_same_basename_files_from_two_repos(monkeypatch, tmp_path, capsys):
+    out, code = _run(monkeypatch, capsys, _dup_graph(tmp_path), "Config")
+    assert code == EXIT_AMBIGUOUS
+    assert "web/dup.py" in out and "ml/dup.py" in out
+    assert "in dup.py" not in out, "the two repos must not read as one file"
+    assert "web::dup_config" in out and "ml::dup_config" in out
+
+
+def test_explain_same_basename_message_names_both_repos(tmp_path):
+    G = _load_graph(str(_dup_graph(tmp_path)))
+    nid, refusal = _resolve_single_node(G, "Config")
+    assert nid is None and refusal.startswith("Ambiguous: ")
+    assert "web/dup.py" in refusal and "ml/dup.py" in refusal
+    assert "web::dup_config" in refusal and "ml::dup_config" in refusal
+
+
+def test_full_node_id_answers_same_basename_query(monkeypatch, tmp_path, capsys):
+    out, code = _run(monkeypatch, capsys, _dup_graph(tmp_path), "anything", "--seed", "web::dup_config")
+    assert code is None
+    node_lines = [line for line in out.splitlines() if line.startswith("NODE ")]
+    # NODE lines carry no id, so the repos are told apart by community: web is 0, ml is 1.
+    assert len(node_lines) == 1 and "src=dup.py" in node_lines[0] and "community=0" in node_lines[0]
+
+
+def test_refusal_hint_for_same_basename_names_the_full_node_id(monkeypatch, tmp_path, capsys):
+    """`web/dup.py::Config` does not resolve, so no path::symbol retry may be suggested."""
+    _nid, explain_text = _resolve_single_node(_load_graph(str(_dup_graph(tmp_path))), "Config")
+    query_text, _code = _run(monkeypatch, capsys, _dup_graph(tmp_path), "Config")
+    for text in (explain_text, query_text):
+        assert text.startswith("Ambiguous: "), text
+        assert "web::dup_config" in text
+        assert "::Config" not in text
+        assert "path::symbol" not in text
+
+
+def test_same_repo_different_paths_message_is_unchanged(monkeypatch, tmp_path, capsys):
+    plain, plain_code = _run(monkeypatch, capsys, _write_graph(tmp_path), "Response")
+    tagged_nodes = [{**n, "repo": "web"} for n in _nodes()]
+    tagged, tagged_code = _run(monkeypatch, capsys, _write_graph(tmp_path, tagged_nodes, name="repo.json"), "Response")
+    assert plain_code == tagged_code == EXIT_AMBIGUOUS
+    assert "matches 2 nodes in different files." in tagged
+    assert tagged == plain
+
+
+def test_seed_naming_same_basename_files_is_refused(monkeypatch, tmp_path, capsys):
+    out, code = _run(monkeypatch, capsys, _dup_graph(tmp_path), "anything", "--seed", "Config")
+    assert code == EXIT_AMBIGUOUS and out.startswith("Ambiguous: ")
+    assert "web/dup.py" in out and "ml/dup.py" in out
