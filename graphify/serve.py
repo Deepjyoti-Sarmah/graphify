@@ -784,6 +784,15 @@ def _pick_scored_endpoint(G: nx.Graph, scored: list[tuple[float, str]], query: s
     return scored[0][1]
 
 
+def _label_key(G: nx.Graph, nid: str) -> str:
+    """Normalized label of *nid*: the key `_pick_seeds` dedups on and the ambiguity
+    check groups on, mirroring `_score_nodes`' normalization so `GET`/`Get`/`get`
+    collapse together."""
+    data = G.nodes[nid]
+    return (data.get("norm_label")
+            or _strip_diacritics(data.get("label") or "").lower()) or nid
+
+
 def _pick_seeds(
     scored: list[tuple[float, str]],
     max_k: int = 3,
@@ -834,11 +843,7 @@ def _pick_seeds(
     # collapse together. When G is absent we can't read labels, so fall back to
     # the (unique) node id, which is a no-op — preserving the old behavior.
     def _seed_label_key(nid: str) -> str:
-        if G is None:
-            return nid
-        data = G.nodes[nid]
-        return (data.get("norm_label")
-                or _strip_diacritics(data.get("label") or "").lower()) or nid
+        return nid if G is None else _label_key(G, nid)
 
     top_score = scored[0][0]
     seeds: list[str] = []
@@ -1410,6 +1415,54 @@ def _traversal_view(G: nx.Graph) -> nx.Graph:
 _QUERY_NO_MATCH = "No matching nodes found."
 
 
+def _resolve_seed_value(G: nx.Graph, value: str, seed_root: Path | None) -> tuple[str | None, str | None]:
+    """Resolve one `--seed` value to ``(node_id, None)``, ``(None, None)`` for no match,
+    or ``(None, refusal)`` when it names nodes in several files.
+
+    `resolve_seed` (shared with `affected`) answers None for both "nothing matches" and
+    "several match"; this tells them apart without changing it. The `path::symbol` form
+    the refusal asks for is resolved here too, as `explain` and `path` resolve it.
+    """
+    from graphify.affected import resolve_seed
+    nid = resolve_seed(G, value, seed_root)
+    if nid is not None:
+        return nid, None
+    if "::" in value:
+        source_exact = _find_node_tiers(G, value)[0]
+        if len(source_exact) == 1:
+            return source_exact[0], None
+    rivals = find_node_ambiguity(G, value)
+    if rivals:
+        return None, _ambiguity_message(G, value, rivals)
+    return None, None
+
+
+def _ambiguous_top_seed(G: nx.Graph, ranked: list[tuple[float, str]]) -> str | None:
+    """Refusal when the best match is one name defined in several files, else None.
+
+    `_pick_seeds` keeps one seed per label (#1766), so a name defined in two files
+    that tie on score is decided by graph iteration order and the answer silently
+    describes one file. `explain` and `path` refuse that tie; this refuses it for
+    `query` too. Only a tie at the top score counts: a question that names a path
+    (`train.py::Response`) lifts one file's node above the rest, which is the retry
+    the refusal asks for. Duplicates inside one file are not a choice between files and
+    keep #1766's one-seed behaviour. A generic name defined in many files (route `GET`
+    handlers) is refused too: #1766 only keeps it from flooding the traversal.
+    """
+    top_score, top_nid = ranked[0]
+    key = _label_key(G, top_nid)
+    tied = []
+    for score, nid in ranked:
+        if score < top_score:
+            break
+        if _label_key(G, nid) == key:
+            tied.append(nid)
+    rivals = _rivals_across_files(G, tied)
+    if not rivals:
+        return None
+    return _ambiguity_message(G, str(G.nodes[top_nid].get("label") or top_nid), rivals)
+
+
 def _query_graph_text(
     G: nx.Graph,
     question: str,
@@ -1431,15 +1484,22 @@ def _query_graph_text(
     # one node is reported and skipped, never guessed.
     unresolved: list[str] = []
     if seeds:
-        from graphify.affected import resolve_seed
         start_nodes: list[str] = []
+        refusals: list[str] = []
         for value in seeds:
-            nid = resolve_seed(G, value, seed_root)
-            if nid is None:
+            nid, refusal = _resolve_seed_value(G, value, seed_root)
+            if refusal:
+                if refusal not in refusals:
+                    refusals.append(refusal)
+            elif nid is None:
                 if value not in unresolved:
                     unresolved.append(value)
             elif nid not in start_nodes:
                 start_nodes.append(nid)
+        # A value that names several nodes is refused, not skipped like a value that
+        # names none: dropping it would answer a narrower question than the one asked.
+        if refusals:
+            return "\n\n".join(refusals)
         if not start_nodes:
             return "No unique node match for --seed: " + ", ".join(seeds)
         return _render_query(G, question, start_nodes, mode=mode, depth=depth, token_budget=token_budget,
@@ -1468,6 +1528,9 @@ def _query_graph_text(
     start_nodes = _pick_seeds(qs.ranked, G=G, best_seed_by_term=best_seed_by_term, term_order=qs.term_order)
     if not start_nodes:
         return _QUERY_NO_MATCH
+    refusal = _ambiguous_top_seed(G, qs.ranked)
+    if refusal:
+        return refusal
     return _render_query(G, question, start_nodes, mode=mode, depth=depth, token_budget=token_budget,
                          context_filters=context_filters, graph_path=graph_path)
 

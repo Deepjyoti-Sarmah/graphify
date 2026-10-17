@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import networkx as nx
 
-from graphify.serve import _query_graph_text, _read_graph
+from graphify.serve import _is_ambiguity_refusal, _query_graph_text, _read_graph
 from graphify.paths import default_graph_json as _default_graph_json
 
 
@@ -38,7 +38,7 @@ def _query_subgraph_tokens(G: nx.Graph, question: str, depth: int = 3, token_bud
     the MCP tool's defaults), 0 when nothing in the graph matches it. The
     answer is the real one an agent receives: seeds, budget cut and notices."""
     text = _query_graph_text(G, question, mode="bfs", depth=depth, token_budget=token_budget)
-    if text == "No matching nodes found.":
+    if text == "No matching nodes found." or _is_ambiguity_refusal(text):
         return 0
     return _estimate_tokens(text)
 
