@@ -536,3 +536,20 @@ def test_graph_stats_commit_follows_project_path(tmp_path):
         default = _call_tool(client, headers, "graph_stats", {}, rid=3)
     assert scoped == _STATS_NO_COMMIT + f"Built at commit: {sha} (matches HEAD)\n"
     assert default == _STATS_NO_COMMIT
+
+
+def test_query_graph_tool_returns_the_ambiguity_refusal(tmp_path):
+    """A name defined in two files comes back from the MCP query_graph tool as the refusal
+    with the candidates, not as one file's answer (#4511)."""
+    graph = {"directed": True, "edges": [], "nodes": [
+        {"id": "web::response", "label": "Response", "source_file": "server.py", "community": 0},
+        {"id": "ml::response", "label": "Response", "source_file": "train.py", "community": 1},
+    ]}
+    path = tmp_path / "ambiguous.json"
+    path.write_text(json.dumps(graph), encoding="utf-8")
+    app = serve_mod._build_http_app(str(path), json_response=True)
+    with _client(app) as client:
+        headers = _init_session(client)
+        text = _call_tool(client, headers, "query_graph", {"question": "Response"}, rid=2)
+    assert text.startswith("Ambiguous: 'Response' matches 2 nodes in different files.")
+    assert "server.py" in text and "train.py" in text
