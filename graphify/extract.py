@@ -81,7 +81,7 @@ from graphify.extractors.solidity import (  # noqa: F401
     resolve_solidity_inherited_calls,
     resolve_solidity_type_references,
 )
-from graphify.extractors.sql import extract_sql  # noqa: F401
+from graphify.extractors.sql import _norm_ident as _sql_norm_ident, extract_sql  # noqa: F401
 from graphify.extractors.terraform import extract_terraform, prepare_terraform, resolve_terraform_modules  # noqa: F401
 from graphify.extractors.verilog import extract_verilog  # noqa: F401
 from graphify.extractors.vbnet import extract_vbnet, resolve_vbnet_partial_calls  # noqa: F401
@@ -3827,6 +3827,7 @@ _LANG_FAMILY_BY_EXT: dict[str, str] = {
     ".ex": "elixir", ".exs": "elixir",
     ".jl": "julia",
     ".dart": "dart",
+    ".sql": "sql",
     ".sh": "shell", ".bash": "shell",
     ".ps1": "powershell", ".psm1": "powershell", ".psd1": "powershell",
 }
@@ -4009,6 +4010,24 @@ def _rewire_unique_stub_nodes(nodes: list[dict], edges: list[dict]) -> None:
         target_id = candidates[0].get("id")
         if isinstance(target_id, str) and target_id and target_id != stub_id:
             remap[stub_id] = target_id
+
+    # SQL: a table no file defines is one table however many files read it, so the
+    # per-file stubs of one name fold into a single node.
+    sql_stubs: dict[str, list[str]] = {}
+    real_by_id = {node.get("id"): node for node in nodes if node.get("source_file")}
+    for stub in stubs:
+        stub_id = str(stub.get("id", ""))
+        if not stub_id or not str(stub.get("origin_file", "")).lower().endswith(".sql"):
+            continue
+        if _lang_family(real_by_id.get(remap.get(stub_id), {}).get("source_file")) not in (None, "sql"):
+            del remap[stub_id]  # a same-named definition in another language is not this table
+        if stub_id not in remap:
+            sql_stubs.setdefault(_sql_norm_ident(str(stub.get("label", ""))), []).append(stub_id)
+    for stub_ids in sql_stubs.values():
+        survivor = min(stub_ids)  # not the first seen: that would follow the file order
+        for stub_id in stub_ids:
+            if stub_id != survivor:
+                remap[stub_id] = survivor
 
     if not remap:
         return
