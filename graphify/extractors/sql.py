@@ -263,6 +263,44 @@ def _scan_sql(text: str) -> tuple[str, list[tuple[int, int]]]:
     return "".join(out), ident_spans
 
 
+# A `GO` batch separator is a client-tool command, not SQL: tree-sitter-sql reads it as an
+# identifier, so without a `;` before it the next statement is swallowed into an ERROR node.
+# Found on the masked text (comments and strings blanked), alone on its line, optionally
+# followed by a repeat count.
+_GO_LINE_RX = re.compile(r"^[ \t]*(GO(?:[ \t]+\d+)?)[ \t\r]*;?[ \t\r]*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _go_separators(source: bytes) -> list[tuple[int, int]]:
+    """Byte spans of the `GO [n]` batch-separator lines in a T-SQL script.
+
+    A bare `go` on its own line is a column or alias, not a separator, only when the last
+    non-blank character before it is a comma or the first one after it is a comma or `)`.
+    Any keyword may precede a real separator (`SET NOCOUNT ON` / `GO`), so none is consulted.
+    """
+    try:
+        text = source.decode("utf-8")
+    except UnicodeDecodeError:
+        return []
+    masked = _scan_sql(text)[0]
+    spans: list[tuple[int, int]] = []
+    size = len(masked)
+    char_pos = byte_pos = 0  # a character offset and its byte offset, advanced as matches are met
+    for m in _GO_LINE_RX.finditer(masked):
+        before, after = m.start() - 1, m.end()
+        while before >= 0 and masked[before].isspace():
+            before -= 1
+        while after < size and masked[after].isspace():
+            after += 1
+        start, end = m.start(1), m.end(1)
+        byte_start = byte_pos + len(text[char_pos:start].encode("utf-8"))
+        byte_end = byte_start + len(text[start:end].encode("utf-8"))
+        char_pos, byte_pos = end, byte_end
+        if (before >= 0 and masked[before] == ",") or (after < size and masked[after] in ",)"):
+            continue
+        spans.append((byte_start, byte_end))
+    return spans
+
+
 def _mask_sql_comments(text: str) -> str:
     """Masked text only — see _scan_sql for the span-reporting form."""
     return _scan_sql(text)[0]
@@ -314,7 +352,11 @@ def extract_sql(path: Path, content: str | bytes | None = None) -> dict:
             else content if content is not None
             else _read_source_bytes(path)
         )
-        tree = parser.parse(source)
+        # `GO` is not SQL; as `;` (same length, so offsets and lines hold) it ends the statement.
+        patched = bytearray(source)
+        for start, end in _go_separators(source):
+            patched[start:end] = b";" + b" " * (end - start - 1)
+        tree = parser.parse(bytes(patched))
         root = tree.root_node
     except Exception as e:
         return {"nodes": [], "edges": [], "error": str(e)}
