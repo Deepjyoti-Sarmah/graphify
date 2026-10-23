@@ -859,9 +859,9 @@ def to_obsidian(
 
         # Build tags for this node
         ftype = data.get("file_type", "")
-        ftype_tag = _FTYPE_TAG.get(ftype, f"graphify/{ftype}" if ftype else "graphify/document")
+        ftype_tag = _FTYPE_TAG.get(ftype, f"graphify/{_obsidian_tag(ftype)}" if ftype else "graphify/document")
         dom_conf = _dominant_confidence(node_id)
-        conf_tag = f"graphify/{dom_conf}"
+        conf_tag = f"graphify/{_obsidian_tag(dom_conf)}"
         comm_tag = f"community/{_obsidian_tag(community_name)}"
         node_tags = [ftype_tag, conf_tag, comm_tag]
 

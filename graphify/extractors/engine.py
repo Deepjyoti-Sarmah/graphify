@@ -190,6 +190,85 @@ def _csharp_type_name_for_id(node, class_name: str) -> str:
     return f"{class_name}`{arity}" if arity else class_name
 
 
+def _csharp_method_signature(node, source: bytes) -> tuple[str, dict]:
+    """A C# method's parameter signature and the argument counts it accepts.
+
+    The signature (``"`1:this Foo,ref int,params int[]"``) tells overloads
+    apart; the metadata (``arity``, plus ``min_arity`` for optional, ``params``
+    and extension parameters, and ``variadic`` for ``params``) lets a call site
+    pick the overload its argument count fits (#4584).
+    """
+    parts: list[str] = []
+    arity = required = 0
+    variadic = extension = False
+    params = node.child_by_field_name("parameters")
+    children = params.children if params is not None else []
+    for i, c in enumerate(children):
+        if c.type == "parameter":
+            mods = [_read_text(m, source) for m in c.children if m.type == "modifier"]
+            type_node = c.child_by_field_name("type")
+            # No whitespace in a type, so `Dictionary<string, int>`, a line
+            # break inside it, or CRLF never changes the id.
+            type_text = "".join(_read_text(type_node, source).split()) if type_node is not None else ""
+            parts.append(" ".join(mods + [type_text]))
+            arity += 1
+            if "this" in mods and arity == 1:
+                extension = True
+            if not any(x.type == "=" for x in c.children):
+                required += 1
+        elif c.type == "params":
+            type_node = children[i + 1] if i + 1 < len(children) else None
+            parts.append("params " + ("".join(_read_text(type_node, source).split()) if type_node is not None else ""))
+            arity += 1
+            variadic = True
+    type_params = sum(
+        1 for c in node.children if c.type == "type_parameter_list"
+        for _p in c.children if _p.type in ("type_parameter", "identifier")
+    )
+    signature = ",".join(parts)
+    if type_params:
+        signature = f"`{type_params}:{signature}"
+    meta: dict = {"arity": arity}
+    # An extension method is also called as `x.M(rest)`, one argument short.
+    min_arity = required - 1 if extension else required
+    if min_arity < arity:
+        meta["min_arity"] = min_arity
+    if variadic:
+        meta["variadic"] = True
+    return signature, meta
+
+
+def _csharp_argc(call_node) -> int | None:
+    """Argument count of a C# invocation, or None for anything else."""
+    if call_node.type != "invocation_expression":
+        return None
+    args = call_node.child_by_field_name("arguments")
+    return sum(1 for c in args.children if c.type == "argument") if args is not None else 0
+
+
+def _csharp_pick_overload(overloads: list[dict], argc: int | None) -> dict | None:
+    """The one overload a call with ``argc`` arguments can mean, or None.
+
+    ``overloads`` are the method nodes of one name on one type. Only the
+    argument count is known at the call site, so two overloads that both
+    accept it (``M(int)`` / ``M(string)``, or ``M(int)`` / ``M(params int[])``)
+    stay undecided; C# would pick by argument types, which are not known here
+    (#4584).
+    """
+    if argc is None:
+        return None
+    fits = []
+    for n in overloads:
+        meta = n.get("metadata") or {}
+        arity = meta.get("arity")
+        if not isinstance(arity, int):
+            return None
+        low = meta.get("min_arity", arity)
+        if low <= argc and (argc <= arity or meta.get("variadic")):
+            fits.append(n)
+    return fits[0] if len(fits) == 1 else None
+
+
 def _csharp_pre_scan_name_collisions(
     root_node, source: bytes, stem: str
 ) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
@@ -1235,6 +1314,49 @@ def _swift_declaration_keyword(node) -> str | None:
             return c.type
     return None
 
+_PY_TYPE_ALIAS_ANNOTATIONS = frozenset({
+    "TypeAlias", "typing.TypeAlias", "typing_extensions.TypeAlias",
+})
+_PY_NEW_TYPE_CALLEES = frozenset({"NewType", "typing.NewType", "typing_extensions.NewType"})
+
+
+def _python_alias_name(stmt, source: bytes) -> str | None:
+    """The type name a module-level statement declares as an explicit alias.
+
+    `type Vector = ...` / `type Pair[T] = ...` (PEP 695), `Matrix: TypeAlias = ...`
+    and `UserId = NewType("UserId", int)` each declare one. A bare
+    `JsonValue = Union[...]` is an alias by convention only and is not one.
+    A same-name re-export (`Field: TypeAlias = core.Field`, `type Field =
+    core.Field[int]`, or `Field: TypeAlias = Field` after `from core import
+    Field`) denotes the original type and declares no new name, so it
+    returns None: references keep resolving to the one real `Field`.
+    """
+    if stmt.type == "type_alias_statement":
+        left, right = stmt.child_by_field_name("left"), stmt.child_by_field_name("right")
+        name = _read_text(left, source).split("[", 1)[0].strip() if left is not None else ""
+    elif stmt.type == "expression_statement" and len(stmt.named_children) == 1:
+        assign = stmt.named_children[0]
+        left = assign.child_by_field_name("left") if assign.type == "assignment" else None
+        if left is None or left.type != "identifier":
+            return None
+        name, right = _read_text(left, source), assign.child_by_field_name("right")
+        annotation = assign.child_by_field_name("type")
+        if annotation is None:
+            callee = right.child_by_field_name("function") if right is not None and right.type == "call" else None
+            # NewType always mints a new type, even under its own name.
+            return name if callee is not None and _read_text(callee, source) in _PY_NEW_TYPE_CALLEES else None
+        if _read_text(annotation, source).strip() not in _PY_TYPE_ALIAS_ANNOTATIONS:
+            return None
+    else:
+        return None
+    if not name.isidentifier():
+        return None
+    target = _read_text(right, source).split("[", 1)[0].strip() if right is not None else ""
+    if target.rsplit(".", 1)[-1] == name:
+        return None
+    return name
+
+
 def _python_pre_scan_underscore_collisions(root_node, source: bytes, stem: str) -> dict[str, set[str]]:
     """Pre-scan a Python module for name-only differences that collapse to one node id.
 
@@ -1275,7 +1397,10 @@ def _python_pre_scan_underscore_collisions(root_node, source: bytes, stem: str) 
 
     classes: list = []  # (class_name, body) for the method pass below
     for child in map(_undecorated, root_node.children):
-        if child.type == "function_definition":
+        alias_name = _python_alias_name(child, source)
+        if alias_name:
+            _record(_make_id(stem, alias_name), alias_name)
+        elif child.type == "function_definition":
             name_node = child.child_by_field_name("name")
             if name_node is not None:
                 name = _read_text(name_node, source)
@@ -4802,6 +4927,70 @@ def _scala_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: s
         return True
     return False
 
+def _cpp_declarator_type_name(declarator, source: bytes) -> str | None:
+    """The name a typedef declarator introduces: `Handle`, `*HandlePtr`,
+    `(*Fn)(int)`, `Arr[4]` each wrap one `type_identifier`."""
+    node = declarator
+    while node is not None and node.type != "type_identifier":
+        inner = node.child_by_field_name("declarator")
+        if inner is None and node.type == "parenthesized_declarator":
+            inner = next(iter(node.named_children), None)
+        node = inner
+    return _read_text(node, source) if node is not None else None
+
+
+def _cpp_type_last_name(type_node, source: bytes) -> str | None:
+    """`Bar` for `ns::Bar` or `ns::Bar<T>`: the name a qualified type ends in."""
+    if type_node is not None and type_node.type == "type_descriptor":
+        type_node = type_node.child_by_field_name("type")
+    if type_node is None or type_node.type != "qualified_identifier":
+        return None
+    while type_node is not None and type_node.type == "qualified_identifier":
+        type_node = type_node.child_by_field_name("name")
+    if type_node is not None and type_node.type == "template_type":
+        type_node = type_node.child_by_field_name("name")
+    return _read_text(type_node, source) if type_node is not None else None
+
+
+def _cpp_alias_names(node, source: bytes) -> list[str]:
+    """The type names a namespace- or file-scope `using X = ...;` or `typedef`
+    declares. A member alias (`using value_type = T;` in a class) is not one: it
+    sits in every container and C++ member ids are not class-qualified, so they
+    would fold into one hub. Neither is the struct a C-style
+    `typedef struct Foo {...} Foo;` names (the struct's own node is it), nor a
+    same-name re-export (`using Bar = ns::Bar;`), which denotes the original
+    type and declares no new name. An include guard or `#if`/`#ifdef` block is
+    a conditional wrapper, not a scope, so an alias inside one keeps the scope
+    around it."""
+    scope = node.parent
+    while scope is not None and (
+            scope.type == "template_declaration" or scope.type.startswith("preproc_")):
+        scope = scope.parent
+    if scope is None or scope.type not in ("translation_unit", "declaration_list"):
+        return []
+    target = node.child_by_field_name("type")
+    if node.type == "alias_declaration":
+        name_node = node.child_by_field_name("name")
+        candidates = [_read_text(name_node, source)] if name_node is not None else []
+    else:
+        candidates = [_cpp_declarator_type_name(d, source)
+                      for d in node.children_by_field_name("declarator")]
+    own_names = {_cpp_type_last_name(target, source)}
+    if target is not None and target.type in (
+            "struct_specifier", "class_specifier", "union_specifier", "enum_specifier"):
+        spec_name = target.child_by_field_name("name")
+        if spec_name is not None:
+            own_names.add(_read_text(spec_name, source))
+    # A set, not `in names`: one typedef can declare thousands of names.
+    names: list[str] = []
+    seen = set(own_names)
+    for name in candidates:
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
 def _cpp_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: str,
                     nodes: list, edges: list, seen_ids: set, function_bodies: list,
                     parent_class_nid: str | None, add_node_fn, add_edge_fn) -> bool:
@@ -4812,7 +5001,22 @@ def _cpp_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: str
     `enumerator` node (`Red`, `Green = 2`) whose name is its `name` field
     (an `identifier`). Without this the enum type is a memberless leaf. This is
     the C++ parity of Java #1719 (enum_constant), Swift, and Scala.
+
+    A namespace- or file-scope alias (`using X = ...;`, `typedef ... X;`) also
+    gets a type node contained by the file, so a type reference to it lands on
+    a sourced declaration instead of a sourceless stub. Returns False for it:
+    the walk goes on, so a typedef'd struct body still gets its own node.
+    C++ never populates namespace_stack, so the id is the one
+    ensure_named_node looks up for a name declared in this file.
     """
+    if node.type in ("alias_declaration", "type_definition"):
+        line = node.start_point[0] + 1
+        for alias_name in _cpp_alias_names(node, source):
+            alias_nid = _make_id(stem, alias_name)
+            if alias_nid not in seen_ids:
+                add_node_fn(alias_nid, alias_name, line)
+                add_edge_fn(file_nid, alias_nid, "contains", line)
+        return False
     if node.type == "enumerator" and parent_class_nid:
         name_node = node.child_by_field_name("name")
         if name_node is None:
@@ -5948,6 +6152,9 @@ def _extract_generic(
     # class nid -> method name -> one [return type, type-param count] per
     # overload, for typing `var v = R.M<A>()` cross-file (#4266).
     csharp_method_returns: dict[str, dict[str, list]] = {}
+    # plain method nid -> {signature: node} for the overloads of one name on
+    # one type, in declaration order (#4584).
+    csharp_overloads: dict[str, dict[str, dict]] = {}
 
     csharp_interface_names: set[str] = set()
     csharp_type_groups: dict[str, set[str]] = {}
@@ -7629,6 +7836,18 @@ def _extract_generic(
                     func_nid = _underscore_salted_nid(
                         func_nid, sanitized_name, csharp_member_groups
                     )
+                    if t == "method_declaration":
+                        # Overloads share a name, so they minted one id and
+                        # every later overload vanished into the first (#4584).
+                        # The first declaration keeps the plain id; each other
+                        # signature gets its own, salted like #3302/#4415.
+                        csharp_sig, csharp_sig_meta = _csharp_method_signature(node, source)
+                        group = csharp_overloads.setdefault(func_nid, {})
+                        if group and csharp_sig not in group:
+                            salt = hashlib.sha1(
+                                csharp_sig.encode("utf-8"), usedforsecurity=False
+                            ).hexdigest()[:6]
+                            func_nid = _make_id(func_nid, salt)
                 elif (config.ts_module in ("tree_sitter_javascript", "tree_sitter_typescript")
                       and t in _JS_MEMBER_METHOD_TYPES):
                     func_nid = _js_member_nid(
@@ -7654,12 +7873,18 @@ def _extract_generic(
                         existing_metadata = dict(existing_method.get("metadata") or {})
                         existing_metadata.update(ruby_method_metadata)
                         existing_method["metadata"] = sanitize_metadata(existing_metadata)
+                method_metadata = ruby_method_metadata
+                if config.ts_module == "tree_sitter_c_sharp" and t == "method_declaration":
+                    method_metadata = {**csharp_sig_meta, "signature": csharp_sig}
                 add_node(
                     func_nid,
                     f".{func_name}()",
                     line,
-                    metadata=ruby_method_metadata,
+                    metadata=method_metadata,
                 )
+                if (config.ts_module == "tree_sitter_c_sharp" and t == "method_declaration"
+                        and csharp_sig not in group and nodes and nodes[-1]["id"] == func_nid):
+                    group[csharp_sig] = nodes[-1]
                 add_edge(parent_class_nid, func_nid, "method", line)
                 if config.ts_module == "tree_sitter_c_sharp" and t == "method_declaration":
                     csharp_method_returns.setdefault(parent_class_nid, {}).setdefault(
@@ -8299,6 +8524,21 @@ def _extract_generic(
                                 ruby_namespace, ruby_lexical_scopes):
                 return
 
+        # An explicit module-level type alias declares a type name: give it a
+        # node so annotations using it reference it instead of minting a
+        # sourceless stub. The statement is then walked as usual.
+        if (t in ("type_alias_statement", "expression_statement")
+                and config.ts_module == "tree_sitter_python" and parent_class_nid is None
+                and node.parent is not None and node.parent.type == "module"):
+            alias_name = _python_alias_name(node, source)
+            if alias_name:
+                alias_line = node.start_point[0] + 1
+                alias_nid = _underscore_salted_nid(
+                    _make_id(stem, alias_name), alias_name, python_underscore_groups
+                )
+                add_node(alias_nid, alias_name, alias_line)
+                add_edge(file_nid, alias_nid, "contains", alias_line)
+
         # Python's `@property` / `@staticmethod` / `@classmethod` wrap the
         # inner function_definition in a `decorated_definition` node. The
         # default recurse below clears parent_class_nid, which would cause the
@@ -8461,6 +8701,13 @@ def _extract_generic(
         else:
             label_to_nid.setdefault(normalised, n["id"])
             label_to_nid_ci.setdefault(normalised.lower(), n["id"])
+
+    # method nid -> its overloads (declaration order), for the call walk.
+    csharp_overload_peers: dict[str, list[dict]] = {
+        peer["id"]: list(group.values())
+        for group in csharp_overloads.values() if len(group) > 1
+        for peer in group.values()
+    }
 
     seen_call_pairs: set[tuple[str, str]] = set()
     seen_indirect_pairs: set[tuple[str, str]] = set()  # Python indirect_call dedup
@@ -9564,6 +9811,12 @@ def _extract_generic(
                 # file (an annotation elsewhere in this file created it), so the
                 # call still goes to raw_calls for cross-file resolution, which
                 # skips source-less candidates on its own (#3888).
+                # C#: the name found one overload; the argument count picks
+                # the one this call means, else the first declared (#4584).
+                if tgt_nid in csharp_overload_peers:
+                    peers = csharp_overload_peers[tgt_nid]
+                    picked = _csharp_pick_overload(peers, _csharp_argc(node))
+                    tgt_nid = (picked or peers[0])["id"]
                 external_stub_target = bool(tgt_nid and not nid_to_sf.get(tgt_nid))
                 if tgt_nid and not external_stub_target:
                     pair = (caller_nid, tgt_nid)
@@ -9667,6 +9920,9 @@ def _extract_generic(
                         # class fields/properties are the base scope.
                         if config.ts_module == "tree_sitter_c_sharp":
                             rc_entry["lang"] = "csharp"
+                            argc = _csharp_argc(node)
+                            if argc is not None:
+                                rc_entry["arity"] = argc
                             # `new X()` can only construct a type, never an enum
                             # member or property that happens to share X's name.
                             if node.type == "object_creation_expression":

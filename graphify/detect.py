@@ -22,7 +22,7 @@ from graphify.google_workspace import (
     convert_google_workspace_file,
     google_workspace_enabled,
 )
-from graphify.paths import GRAPHIFY_OUT, GRAPHIFY_OUT_NAME, out_path
+from graphify.paths import GRAPHIFY_OUT, GRAPHIFY_OUT_NAME, os_long_path, out_path
 from graphify.rcfile import activate_language_overrides, cache_salt, effective_suffix
 
 
@@ -45,12 +45,13 @@ _MANIFEST_PATH = str(out_path("manifest.json"))
 _MTIME_COARSE_S = 2.0
 _MTIME_SUBSECOND_S = 0.05
 
-CODE_EXTENSIONS = {'.py', '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.ejs', '.ets', '.go', '.rs', '.vb', '.cbl', '.cob', '.cobol', '.cpy', '.java', '.groovy', '.gradle', '.cpp', '.cc', '.cxx', '.c', '.h', '.hpp', '.cu', '.cuh', '.metal', '.rb', '.rake', '.swift', '.kt', '.kts', '.cs', '.scala', '.php', '.lua', '.luau', '.toc', '.zig', '.ps1', '.psm1', '.psd1', '.ex', '.exs', '.m', '.mm', '.ml', '.mli', '.jl', '.vue', '.svelte', '.astro', '.dart', '.v', '.sv', '.svh', '.vh', '.sql', '.r', '.f', '.F', '.f90', '.F90', '.f95', '.F95', '.f03', '.F03', '.f08', '.F08', '.pas', '.pp', '.dpr', '.dpk', '.lpr', '.inc', '.dfm', '.lfm', '.lpk', '.sh', '.bash', '.json', '.tf', '.tfvars', '.hcl', '.dm', '.dme', '.dmi', '.dmm', '.dmf', '.sln', '.slnx', '.csproj', '.fsproj', '.vbproj', '.xaml', '.razor', '.cshtml', '.cls', '.trigger', '.lisp', '.cl', '.lsp', '.asd', '.robot', '.resource', '.sol', '.erl', '.hrl', '.escript'}
-DOC_EXTENSIONS = {'.md', '.mdx', '.qmd', '.skill', '.txt', '.rst', '.html', '.yaml', '.yml', '.j2', '.jinja', '.jinja2'}
+CODE_EXTENSIONS = {'.py', '.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.ejs', '.ets', '.go', '.rs', '.vb', '.cbl', '.cob', '.cobol', '.cpy', '.java', '.groovy', '.gradle', '.cpp', '.cc', '.cxx', '.c', '.h', '.hpp', '.cu', '.cuh', '.metal', '.rb', '.rake', '.swift', '.kt', '.kts', '.cs', '.scala', '.php', '.lua', '.luau', '.toc', '.zig', '.ps1', '.psm1', '.psd1', '.ex', '.exs', '.m', '.mm', '.ml', '.mli', '.jl', '.vue', '.svelte', '.astro', '.dart', '.v', '.sv', '.svh', '.vh', '.sql', '.r', '.f', '.F', '.f90', '.F90', '.f95', '.F95', '.f03', '.F03', '.f08', '.F08', '.pas', '.pp', '.dpr', '.dpk', '.lpr', '.inc', '.dfm', '.lfm', '.lpk', '.sh', '.bash', '.json', '.yaml', '.yml', '.tf', '.tfvars', '.hcl', '.dm', '.dme', '.dmi', '.dmm', '.dmf', '.sln', '.slnx', '.csproj', '.fsproj', '.vbproj', '.xaml', '.razor', '.cshtml', '.cls', '.trigger', '.lisp', '.cl', '.lsp', '.asd', '.robot', '.resource', '.sol', '.erl', '.hrl', '.escript'}
+DOC_EXTENSIONS = {'.md', '.mdx', '.qmd', '.skill', '.txt', '.rst', '.html', '.j2', '.jinja', '.jinja2'}
 PAPER_EXTENSIONS = {'.pdf'}
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'}
 OFFICE_EXTENSIONS = {'.docx', '.xlsx'}
 VIDEO_EXTENSIONS = {'.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v', '.mp3', '.wav', '.m4a', '.ogg'}
+_BINARY_MEDIA_EXTENSIONS = (IMAGE_EXTENSIONS - {'.svg'}) | VIDEO_EXTENSIONS
 
 CORPUS_WARN_THRESHOLD = 50_000    # words - below this, warn "you may not need a graph"
 CORPUS_UPPER_THRESHOLD = 500_000  # words - above this, warn about token cost
@@ -931,6 +932,8 @@ def convert_office_file(path: Path, out_dir: Path, root: "Path | None" = None) -
 def count_words(path: Path) -> int:
     try:
         ext = path.suffix.lower()
+        if ext in _BINARY_MEDIA_EXTENSIONS:
+            return 0
         if ext == ".pdf":
             return len(extract_pdf_text(path).split())
         if ext == ".docx":
@@ -2234,7 +2237,8 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
                     skipped_sensitive.append(str(p) + " [office conversion failed - pip install graphifyy[office]]")
                 continue
             files[ftype].append(str(p))
-            if ftype != FileType.VIDEO:
+            # Bypass legacy cached counts derived from binary media bytes.
+            if p.suffix.lower() not in _BINARY_MEDIA_EXTENSIONS:
                 total_words += _wc(p)
 
     for ftype in files:
@@ -2273,32 +2277,8 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
     }
 
 
-def _os_path(path: Path) -> str:
-    r"""Return an OS path string safe for open()/stat() on Windows long paths.
-
-    On win32, paths longer than the legacy MAX_PATH (260 chars) are rejected by
-    the plain file APIs unless prefixed with the extended-length marker ``\\?\``
-    (which also requires a fully-qualified path). Without it, _md5_file /
-    save_manifest / count_words silently fail to hash deeply-nested files, so
-    their manifest entry never stabilizes and detect_incremental re-flags them
-    as changed on every run (#1655). cache._normalize_path strips this prefix
-    for stable KEYS; this adds it for I/O. Non-win32 and already-prefixed paths
-    pass through unchanged.
-    """
-    import sys
-    if sys.platform != "win32":
-        return str(path)
-    s = str(path)
-    if s.startswith("\\\\?\\"):
-        return s
-    try:
-        s = os.path.abspath(s)  # \\?\ requires a fully-qualified path
-    except Exception:
-        return str(path)
-    if s.startswith("\\\\"):
-        # UNC share \\server\share -> \\?\UNC\server\share
-        return "\\\\?\\UNC\\" + s[2:]
-    return "\\\\?\\" + s
+# Shared with cache.py (paths.os_long_path); the name stays for detect's callers.
+_os_path = os_long_path
 
 
 def _md5_file(path: Path) -> str:

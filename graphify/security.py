@@ -96,6 +96,8 @@ def _ip_is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
         or ip.is_reserved
         or ip.is_loopback
         or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_unspecified
         or ip in _CGN_NETWORK
     )
 
