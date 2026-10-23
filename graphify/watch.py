@@ -2073,6 +2073,11 @@ def _rebuild_code(
                                 # with, and the imports that say which type they name.
                                 "declared_type",
                                 "imports",
+                                # C# overloads (#4584): which one a call's
+                                # argument count fits.
+                                "min_arity",
+                                "variadic",
+                                "signature",
                             )
                             if key in metadata
                         }
