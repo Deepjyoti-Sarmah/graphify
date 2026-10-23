@@ -761,6 +761,17 @@ def extract_rust(path: Path) -> dict:
                     and (name_node := sibling.child_by_field_name("name")) is not None
                 }
 
+                # A plain `pub use` re-exports the named item from the crate its path
+                # starts with, so a later `use this_crate::Item` may reach a definition
+                # that lives in that crate (#4699). `pub(crate)` and `pub(super)` stay
+                # inside the re-exporting crate, so only a bare `pub` counts.
+                visibility = next(
+                    (child for child in node.children if child.type == "visibility_modifier"),
+                    None,
+                )
+                reexport = visibility is not None and _read_text(
+                    visibility, source).strip() == "pub"
+
                 def name_use(written: str, path: str) -> None:
                     # The name as written, for the corpus rewire (#4439): the id folds its
                     # case. Only for a path rooted in this crate: `serde::Serialize` or
@@ -769,6 +780,7 @@ def extract_rust(path: Path) -> dict:
                     # too (`mod item; pub use item::Invoice;`), unless the path starts with
                     # `::`, which always names a crate (#4564).
                     first = path.lstrip(": ").split("::")[0].strip()
+                    bound = written.split(" as ")[-1].strip()
                     ident = re.match(r"[A-Za-z_][A-Za-z0-9_]*", first)  # `item as items` -> `item`
                     if first in ("crate", "self", "super") or (
                         ident is not None
@@ -776,9 +788,11 @@ def extract_rust(path: Path) -> dict:
                         and not path.lstrip().startswith("::")
                     ):
                         edges[-1]["_rust_use_name"] = written.split(" as ")[0].strip()
-                        use_roots.setdefault(written.split(" as ")[-1].strip(), set()).add("crate")
+                        use_roots.setdefault(bound, set()).add("crate")
                     else:
-                        use_roots.setdefault(written.split(" as ")[-1].strip(), set()).add(first)
+                        use_roots.setdefault(bound, set()).add(first)
+                        if reexport and bound.isidentifier():
+                            edges[-1]["_rust_pub_use"] = {"label": bound, "root": first}
                 module_name = _rust_use_module(_read_text(arg, source))
                 grouped = arg.type in ("use_list", "scoped_use_list")
                 if module_name:

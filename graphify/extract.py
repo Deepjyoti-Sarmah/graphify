@@ -3964,6 +3964,31 @@ def _rewire_unique_stub_nodes(
         if sf.endswith(".rs") and (crate := crate_of(sf)):
             workspace_crates.add(crate)
 
+    # A crate can re-export another crate's item (`pub use core::Thing;`), so an
+    # import that names the re-exporting crate reaches the defining one (#4699).
+    # Keyed by (re-exporting crate, imported label) -> crates it re-exports from.
+    reexports: dict[tuple[str, str], set[str]] = {}
+    for edge in edges:
+        info = edge.get("_rust_pub_use")
+        owner = crate_of(str(edge.get("source_file", "")))
+        if not isinstance(info, dict) or owner is None:
+            continue
+        root = str(info.get("root", ""))
+        if root != "crate":
+            reexports.setdefault((owner, str(info.get("label", ""))), set()).add(root)
+    for _ in range(len(workspace_crates)):  # follow `pub use` chains across crates
+        changed = False
+        for (crate, label), targets in tuple(reexports.items()):
+            more = {
+                deep for root in tuple(targets)
+                for deep in reexports.get((root, label), ())
+            }
+            if not more <= targets:
+                targets |= more
+                changed = True
+        if not changed:
+            break
+
     def in_stub_crate(stub: dict, candidates: list[dict]) -> list[dict]:
         """Keep the candidates that live in a crate the stub's `use` names.
 
@@ -3971,20 +3996,30 @@ def _rewire_unique_stub_nodes(
         stub's name, with `crate` standing for this file's own crate. A stub
         with no Cargo.toml above it, or a candidate with none, keeps v8's
         label-only binding: without a manifest there is no crate to scope by.
+        A crate the `use` names may re-export the item from another crate, so
+        those crates count too — but only after the named crate itself, which
+        always wins when it has the definition.
         """
         origin = str(stub.get("origin_file", ""))
         own = crate_of(origin) if origin.endswith(".rs") else None
         if own is None:
             return candidates
         roots = stub.get("_rust_use_roots") or ["crate"]
-        allowed = {own if root == "crate" else root for root in roots} & workspace_crates
-        scoped = []
-        for candidate in candidates:
-            candidate_file = str(candidate.get("source_file", ""))
-            candidate_crate = crate_of(candidate_file) if candidate_file.endswith(".rs") else None
-            if candidate_crate is None or candidate_crate in allowed:
-                scoped.append(candidate)
-        return scoped
+        label = str(stub.get("label", ""))
+        named = {own if root == "crate" else root for root in roots} & workspace_crates
+        allowed = set(named)
+        for root in named:
+            allowed |= reexports.get((root, label), set())
+
+        def keep(crates: set[str]) -> list[dict]:
+            return [
+                candidate for candidate in candidates
+                if not str(candidate.get("source_file", "")).endswith(".rs")
+                or crate_of(str(candidate.get("source_file", ""))) in (crates | {None})
+            ]
+
+        scoped_named = keep(named)
+        return scoped_named if len(scoped_named) == 1 else keep(allowed)
 
     real_by_label: dict[str, list[dict]] = {}       # exact-case type-like (all languages)
     real_by_label_ci: dict[str, list[dict]] = {}    # case-INSENSITIVE-language reals only
@@ -4143,11 +4178,17 @@ def _rewire_unique_stub_nodes(
             and edge_fam != cand_fam
         )
 
-    # A Rust stub bound by its label alone is a guess: no in-crate `use` of the name
-    # vouches for it (#4699).
+    def _scoped_by_a_use(stub: dict) -> bool:
+        """A `use` that names this crate or a scanned crate vouches for the stub."""
+        roots = stub.get("_rust_use_roots") or []
+        return "crate" in roots or bool(set(roots) & workspace_crates)
+
+    # A Rust stub bound by its label alone is a guess: no `use` that names a corpus
+    # crate vouches for it (#4699).
     rust_by_name_only = {
         stub_id for stub_id in remap
         if str(by_id.get(stub_id, {}).get("origin_file", "")).endswith(".rs")
+        and not _scoped_by_a_use(by_id.get(stub_id, {}))
     } - {edge.get("target") for edge in edges if edge.get("_rust_use_name")}
 
     for edge in edges:
@@ -10970,6 +11011,7 @@ def extract(
     for e in all_edges:
         e.pop("_rust_use_binding", None)
         e.pop("_rust_use_name", None)
+        e.pop("_rust_pub_use", None)
     for n in all_nodes:
         n.pop("_rust_use_roots", None)
 
