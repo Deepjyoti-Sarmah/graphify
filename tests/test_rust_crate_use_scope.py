@@ -173,3 +173,57 @@ def test_a_use_of_this_crate_keeps_the_binding_extracted(tmp_path):
     })
     edges = _edges_between(result, tmp_path, "b", "b")
     assert {edge["confidence"] for edge in edges} == {"EXTRACTED"}
+
+
+def test_a_use_of_a_reexporting_crate_reaches_the_defining_crate(tmp_path):
+    # `api` re-exports `corelib`'s type, as axum re-exports axum-core's.
+    result = _run(tmp_path, {
+        "corelib/src/lib.rs": "pub struct FromRequestParts;\n",
+        "api/src/lib.rs": "pub use corelib::FromRequestParts;\n",
+        "plugin/src/lib.rs": "use api::FromRequestParts;\n\npub fn f(x: &FromRequestParts) {}\n",
+    })
+    assert _edges_between(result, tmp_path, "plugin", "corelib") != []
+
+
+def test_a_reexport_does_not_reach_an_unrelated_namesake(tmp_path):
+    result = _run(tmp_path, {
+        "corelib/src/lib.rs": "pub struct FromRequestParts;\n",
+        "other/src/lib.rs": "pub struct FromRequestParts;\n",
+        "api/src/lib.rs": "pub use corelib::FromRequestParts;\n",
+        "plugin/src/lib.rs": "use api::FromRequestParts;\n\npub fn f(x: &FromRequestParts) {}\n",
+    })
+    assert _edges_between(result, tmp_path, "plugin", "corelib") != []
+    assert _edges_between(result, tmp_path, "plugin", "other") == []
+
+
+def test_a_super_use_of_a_reexported_type_reaches_the_defining_crate(tmp_path):
+    # axum/src/extract/connect_info.rs: `use super::{.., FromRequestParts}` where the
+    # parent module re-exports an axum-core type.
+    result = _run(tmp_path, {
+        "corelib/src/lib.rs": "pub struct FromRequestParts;\n",
+        "api/src/lib.rs": "pub mod sub;\npub use corelib::FromRequestParts;\n",
+        "api/src/sub.rs": "use super::FromRequestParts;\n\npub fn f(x: &FromRequestParts) {}\n",
+    })
+    assert _edges_between(result, tmp_path, "api", "corelib") != []
+
+
+def test_a_crate_restricted_reexport_does_not_leak_out_of_its_crate(tmp_path):
+    # `pub(crate) use` is not visible to another crate, so the name stays unbound.
+    result = _run(tmp_path, {
+        "corelib/src/lib.rs": "pub struct FromRequestParts;\n",
+        "api/src/lib.rs": "pub(crate) use corelib::FromRequestParts;\n",
+        "plugin/src/lib.rs": "use api::FromRequestParts;\n\npub fn f(x: &FromRequestParts) {}\n",
+    })
+    assert _edges_between(result, tmp_path, "plugin", "corelib") == []
+
+
+def test_a_use_of_a_scanned_crate_keeps_the_binding_extracted(tmp_path):
+    result = _run(tmp_path, {
+        "corelib/src/lib.rs": "pub struct FromRequestParts;\n",
+        "plugin/src/lib.rs": (
+            "use corelib::FromRequestParts;\n\npub fn f(x: &FromRequestParts) {}\n"
+        ),
+    })
+    edges = _edges_between(result, tmp_path, "plugin", "corelib")
+    assert edges
+    assert {edge["confidence"] for edge in edges} == {"EXTRACTED"}
