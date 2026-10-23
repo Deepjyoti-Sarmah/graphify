@@ -152,3 +152,24 @@ def test_same_named_types_in_two_crates_have_no_edge_without_a_use(tmp_path):
     assert _edges_between(result, tmp_path, "a", "b") == []
     assert _edges_between(result, tmp_path, "b", "a") == []
 
+
+def test_a_crate_less_binding_is_flagged_inferred_not_extracted(tmp_path):
+    # No Cargo.toml anywhere: there is no crate to scope the external `use` by, so
+    # the rewire still binds by label and must say it is guessing.
+    result = _run(
+        tmp_path,
+        {"a/src/lib.rs": STRUCT_VALUE, "b/src/lib.rs": "use serde_json::Value;\n\n" + USE_VALUE},
+        manifests=False,
+    )
+    edges = _edges_between(result, tmp_path, "b", "a")
+    assert edges
+    assert {edge["confidence"] for edge in edges} == {"INFERRED"}
+
+
+def test_a_use_of_this_crate_keeps_the_binding_extracted(tmp_path):
+    result = _run(tmp_path, {
+        "b/src/lib.rs": "mod model;\nuse crate::model::Value;\n\n" + USE_VALUE,
+        "b/src/model.rs": STRUCT_VALUE,
+    })
+    edges = _edges_between(result, tmp_path, "b", "b")
+    assert {edge["confidence"] for edge in edges} == {"EXTRACTED"}
