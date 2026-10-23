@@ -4143,6 +4143,13 @@ def _rewire_unique_stub_nodes(
             and edge_fam != cand_fam
         )
 
+    # A Rust stub bound by its label alone is a guess: no in-crate `use` of the name
+    # vouches for it (#4699).
+    rust_by_name_only = {
+        stub_id for stub_id in remap
+        if str(by_id.get(stub_id, {}).get("origin_file", "")).endswith(".rs")
+    } - {edge.get("target") for edge in edges if edge.get("_rust_use_name")}
+
     for edge in edges:
         is_csharp_scoped_edge = (
             _is_dotnet_source_file(str(edge.get("source_file", "")))
@@ -4166,6 +4173,8 @@ def _rewire_unique_stub_nodes(
                 edge, str(target), remapped_target
             ) and not _cross_language_candidate(edge, remapped_target):
                 edge["target"] = remapped_target
+                if target in rust_by_name_only:
+                    edge["confidence"] = "INFERRED"
 
     referenced = {x for e in edges for x in (e.get("source"), e.get("target"))}
     drop_ids = {stub_id for stub_id in remap if stub_id not in referenced}
