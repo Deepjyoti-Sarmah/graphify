@@ -8,6 +8,7 @@ back to the full path.
 """
 from __future__ import annotations
 
+import importlib
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ from pathlib import Path
 import pytest
 
 import graphify.extract as extract_mod
+import graphify.watch as watch_mod
 from graphify.watch import _rebuild_code
 
 SKIP_MESSAGE = "No relevant changes"
@@ -239,3 +241,121 @@ def test_scan_digest_tracks_the_file_set_not_the_contents(built: Path) -> None:
 
     (built / "src" / "new.py").unlink()
     assert _scan_digest(detect(built)) == before
+
+
+# --- #4748: a stamp may only describe outputs that are fully on disk ----------
+#
+# A stamp is a promise that the next run may skip. Writing one over a graph.json
+# that a failed or partial write left behind turns that promise into a stale
+# graph nothing repairs. Failing to skip only costs time, so every test here
+# expects the conservative direction.
+
+STAMP_NAME = ".graphify_build_state.json"
+
+FAILURE_TARGETS = [
+    # Each one aborts the run after extraction, at a different write point, so
+    # the next run has to notice that the rebuild never finished.
+    "graphify.cluster.cluster",
+    "graphify.watch.os_replace_with_fallback",
+    "graphify.watch._reconcile_graph_html",
+]
+
+
+@pytest.mark.parametrize("target", FAILURE_TARGETS)
+def test_a_rebuild_that_never_finishes_its_outputs_is_not_skipped_next_run(
+    built: Path, monkeypatch: pytest.MonkeyPatch, capsys, target: str
+) -> None:
+    module_name, attr = target.rsplit(".", 1)
+    module = importlib.import_module(module_name)
+    real = getattr(module, attr)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError(f"boom: {target}")
+
+    # A topology change, so this run has real work and cannot take one of the
+    # no-rewrite short circuits.
+    (built / "src" / "m.py").write_text("def renamed_marker():\n    return 1\n")
+
+    monkeypatch.setattr(module, attr, boom)
+    try:
+        _rebuild_code(built, acquire_lock=False)
+    finally:
+        monkeypatch.setattr(module, attr, real)
+
+    calls = _spy_extract(monkeypatch)
+    _rebuild_code(built, acquire_lock=False)
+    assert SKIP_MESSAGE not in capsys.readouterr().out
+    assert calls, "a rebuild that never finished its outputs must not be skipped"
+
+
+def test_partially_published_graph_is_never_stamped(
+    built: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    # The atomic replace exists because a crash mid-write must not leave a
+    # truncated graph.json (#2689). Its non-atomic fallback can still land part of
+    # the bytes and report success. Stamping that file records the truncated size,
+    # and the next run matches the stamp and skips over the damage forever.
+    graph = built / "graphify-out" / "graph.json"
+    stamp = built / "graphify-out" / STAMP_NAME
+    stamp_before = stamp.read_bytes()
+
+    real_replace = watch_mod.os_replace_with_fallback
+
+    def partial_publish(src, dst):
+        if Path(dst).name == "graph.json":
+            Path(dst).write_bytes(Path(src).read_bytes()[:40])
+            try:
+                Path(src).unlink()
+            except OSError:
+                pass
+            return
+        return real_replace(src, dst)
+
+    (built / "src" / "m.py").write_text("def renamed_marker():\n    return 1\n")
+    monkeypatch.setattr(watch_mod, "os_replace_with_fallback", partial_publish)
+    try:
+        _rebuild_code(built, acquire_lock=False)
+    finally:
+        monkeypatch.setattr(watch_mod, "os_replace_with_fallback", real_replace)
+
+    assert graph.stat().st_size == 40, "the publish must have landed incomplete bytes"
+    assert stamp.read_bytes() == stamp_before, (
+        "a partial graph.json must not be stamped"
+    )
+
+    _rebuild_code(built, acquire_lock=False)
+    assert SKIP_MESSAGE not in capsys.readouterr().out, (
+        "the next run must not skip over a partially written graph"
+    )
+
+
+def test_write_build_state_refuses_a_graph_that_is_not_a_whole_json_object(
+    built: Path,
+) -> None:
+    from graphify.watch import _write_build_state
+
+    graph = built / "graphify-out" / "graph.json"
+    stamp = built / "graphify-out" / STAMP_NAME
+    graph.write_bytes(graph.read_bytes()[:40])
+    stamp.unlink()
+
+    _write_build_state(built / "graphify-out", {}, full_clean=True)
+
+    assert not stamp.exists()
+
+
+def test_write_build_state_refuses_while_a_html_rerender_is_pending(
+    built: Path,
+) -> None:
+    from graphify.exporters.html import _HTML_STALE_MARKER
+    from graphify.watch import _write_build_state
+
+    stamp = built / "graphify-out" / STAMP_NAME
+    stamp.unlink()
+    # The marker means graph.html does not describe the graph yet, so there is no
+    # consistent state to promise the next run.
+    (built / "graphify-out" / _HTML_STALE_MARKER).touch()
+
+    _write_build_state(built / "graphify-out", {}, full_clean=True)
+
+    assert not stamp.exists()
