@@ -1734,16 +1734,57 @@ def _current_build_state(
     }
 
 
+def _graph_json_is_complete(path: Path) -> bool:
+    """Cheap structural check that ``path`` holds a whole JSON object (#4748).
+
+    Deliberately not a full ``json.load``. graph.json is capped at 512 MiB by
+    default (``GRAPHIFY_MAX_GRAPH_BYTES``), and the rebuild that just wrote it is
+    still holding its own copy of the graph, so parsing it again can add a
+    gigabyte of peak RSS to answer one question: did the bytes land whole.
+    Reading the first and last non-whitespace byte answers that for the failure
+    this guards, a partial or truncated publish, which the atomic replace can
+    still produce through its non-atomic fallback.
+
+    Says nothing about corruption in the middle of the file. That would change
+    mtime, which the caller's own stat comparison catches.
+    """
+    try:
+        size = path.stat().st_size
+        if size < 2:
+            return False
+        from graphify.paths import os_long_path
+        with open(os_long_path(path), "rb") as f:
+            head = f.read(64)
+            f.seek(max(0, size - 64))
+            tail = f.read(64)
+    except OSError:
+        return False
+    head = head.lstrip()
+    tail = tail.rstrip()
+    return bool(head) and bool(tail) and head[:1] == b"{" and tail[-1:] == b"}"
+
+
 def _write_build_state(out: Path, state: dict, *, full_clean: bool) -> None:
     """Stamp what the next run has to match to skip (#4740).
 
-    Written only after a rebuild has finished writing its outputs, and it records
-    those outputs as they now are: the gate treats any later change to them as
-    work to do.
+    Refuses to stamp unless the outputs it is about to describe are on disk and
+    whole. A stamp is a promise that the next run may skip, so writing one over a
+    graph.json that a failed or partial publish left behind turns that promise
+    into a stale graph nothing ever repairs (#4748). Any doubt means no stamp,
+    which costs the next run a full rebuild and nothing else.
     """
+    graph = out / "graph.json"
     try:
-        st = (out / "graph.json").stat()
+        st = graph.stat()
     except OSError:
+        return
+    if not _graph_json_is_complete(graph):
+        return
+    from graphify.exporters.html import _HTML_STALE_MARKER
+    if (out / _HTML_STALE_MARKER).exists():
+        # A pending re-render means graph.html does not describe this graph yet.
+        # _build_state_matches() rejects such a stamp anyway, so writing one that
+        # could never match would only make "a stamp exists" meaningless.
         return
     payload = {
         **state,
@@ -1786,7 +1827,8 @@ def _build_state_matches(out: Path, state: dict) -> bool:
         return False
     if prev.get("graph_size") != st.st_size or prev.get("graph_mtime_ns") != st.st_mtime_ns:
         return False
-    if (out / ".graph.html.stale").exists():
+    from graphify.exporters.html import _HTML_STALE_MARKER
+    if (out / _HTML_STALE_MARKER).exists():
         return False
     return prev.get("html_present") is (out / "graph.html").exists()
 
