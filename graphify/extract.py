@@ -193,6 +193,11 @@ from graphify.extractors.julia import extract_julia  # noqa: E402,F401
 
 _RECURSION_LIMIT = 10_000
 
+# Report progress, including the AST cache hit rate, only for runs this size or
+# larger. Below it a run is a handful of changed files, where the rate is
+# trivially 0% or 100% and the line is noise on every save.
+_PROGRESS_INTERVAL = 100
+
 # Language built-in globals that AST may classify as call targets when used as
 # constructors or coercion functions (e.g. String(x), Number(x), Boolean(x)).
 # Without this filter they become god-nodes accumulating spurious edges from
@@ -9142,7 +9147,6 @@ def _extract_parallel(
 
     done_count = 0
     failed: list[int] = []  # positions into uncached_work whose future failed
-    _PROGRESS_INTERVAL = 100
     try:
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=max_workers,
@@ -9237,7 +9241,6 @@ def _extract_sequential(
     cache_location: Path | None = None,
 ) -> None:
     """Extract uncached files sequentially (fallback for small batches)."""
-    _PROGRESS_INTERVAL = 100
     for work_idx, (idx, path) in enumerate(uncached_work):
         if (
             total_files >= _PROGRESS_INTERVAL
@@ -9432,7 +9435,11 @@ def extract(
     # Report the hit rate against the file TOTAL. The "(100%)" on the progress
     # lines below counts progress through the uncached work, and reads as a
     # cache-hit rate, which it is not (#4740).
-    if total:
+    #
+    # Gated like those lines. A watch or hook rebuild passes only the changed
+    # files, so without the gate a one-file save printed a 0% rate that carries
+    # no information.
+    if total >= _PROGRESS_INTERVAL:
         print(
             f"  AST cache: {cache_hits}/{total} files served from cache "
             f"({cache_hits * 100 // total}%); {len(uncached_work)} to extract"
