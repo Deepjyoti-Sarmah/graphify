@@ -2883,6 +2883,146 @@ def _mtime_may_hide_a_rewrite(current_mtime: float, stored: dict) -> bool:
     return delta < (_MTIME_COARSE_S if coarse else _MTIME_SUBSECOND_S)
 
 
+def classify_manifest_files(
+    file_buckets: dict[str, list[str]],
+    manifest: dict,
+    *,
+    kind: str = "ast",
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Split ``file_buckets`` into (changed, unchanged) against ``manifest``.
+
+    This is the comparison ``detect_incremental`` has always used: mtime first
+    (free, no disk IO beyond stat), content hash only when mtime moved or when
+    the racily-clean window needs it. A missing row, a row with no usable hash,
+    a language change, or an unknown row format all count as changed, so a
+    caller can only ever over-report change.
+
+    Factored out so a caller that has already scanned the root reaches the same
+    verdict without paying for ``detect_incremental``'s scan of its own, which is
+    what ``graphify update`` needs to build a change set out of the manifest
+    (#4740). #4748's copy of this helper grows an ``unstamped_is_changed`` flag
+    for its no-change gate; this branch keeps the incremental semantics, where a
+    row that cannot be verified is re-queued until it extracts (#2543).
+
+    ``kind="ast"`` compares ``ast_hash`` (``graphify update``); ``"semantic"``
+    compares ``semantic_hash`` (``graphify extract``).
+    """
+    new_files: dict[str, list[str]] = {k: [] for k in file_buckets}
+    unchanged_files: dict[str, list[str]] = {k: [] for k in file_buckets}
+
+    for ftype, file_list in file_buckets.items():
+        for f in file_list:
+            # Manifest keys are NFC; scan paths may arrive NFD (#2221).
+            stored = manifest.get(_nfc(f))
+            try:
+                current_mtime = os.stat(_os_path(Path(f))).st_mtime
+            except Exception:
+                current_mtime = 0
+
+            # Legacy manifest: plain float value stores only mtime.
+            # Compare with `!=` so backwards mtime motion (git checkout of an
+            # older commit, tarball restore, rsync --times) still triggers a
+            # re-extract; the previous `>` silently kept the stale cache and
+            # the graph drifted from disk (#1859). No stored hash means we
+            # cannot verify content — any mtime delta forces a re-extract,
+            # and the next save promotes the entry into the dict schema.
+            # A language change invalidates even identical bytes and legacy rows.
+            stored_lang = stored.get("language") if isinstance(stored, dict) else None
+            if stored is not None and cache_salt(f) != stored_lang:
+                changed = True
+            elif isinstance(stored, (int, float)):
+                changed = current_mtime != stored
+            elif isinstance(stored, dict):
+                # Normalise legacy {mtime, hash} to new schema
+                if "hash" in stored and "ast_hash" not in stored:
+                    stored = {"mtime": stored.get("mtime", 0), "ast_hash": stored["hash"], "semantic_hash": ""}
+                hash_key = "semantic_hash" if kind == "semantic" else "ast_hash"
+                stored_hash = stored.get(hash_key, "")
+                # Missing semantic_hash means update ran but extract hasn't — always re-extract
+                if not stored_hash:
+                    changed = True
+                else:
+                    stored_mtime = stored.get("mtime")
+                    # Schema-drift guard (#1163): tolerate a nested {mtime: ...}
+                    # dict or any non-numeric value without crashing.
+                    if isinstance(stored_mtime, dict):
+                        stored_mtime = stored_mtime.get("mtime")
+                    if not isinstance(stored_mtime, (int, float)):
+                        stored_mtime = None
+                    if stored_mtime is None or current_mtime != stored_mtime:
+                        # mtime bumped — verify with content hash before re-extracting
+                        changed = _md5_file(Path(f)) != stored_hash
+                    elif _mtime_may_hide_a_rewrite(current_mtime, stored):
+                        # mtime is unchanged, but it was recorded in the same
+                        # filesystem tick the file was written in — a later
+                        # same-length edit lands in that tick without moving
+                        # mtime, and the file silently skips re-extraction
+                        # while the graph keeps serving the old content.
+                        # Only this narrow window pays for a content hash.
+                        changed = _md5_file(Path(f)) != stored_hash
+                    else:
+                        changed = False
+            else:
+                changed = True  # unknown format, re-extract to be safe
+
+            if changed:
+                new_files[ftype].append(f)
+            else:
+                unchanged_files[ftype].append(f)
+
+    return new_files, unchanged_files
+
+
+def classify_manifest_deletions(
+    manifest: dict,
+    scanned: Iterable[str],
+    *,
+    root: Path | None = None,
+) -> tuple[list[str], list[str]]:
+    """Split manifest rows that left the scan into (deleted, excluded).
+
+    A row whose file is gone from DISK is a genuine deletion (its cached nodes
+    are ghosts); a row whose file still exists but is out of the current scan was
+    EXCLUDED by a changed ignore rule and must not be reported as deleted
+    (#1908). Mirrors the watch-side excluded-vs-deleted distinction (#1795).
+    """
+    try:
+        root_res: Path | None = Path(root).resolve() if root is not None else None
+    except (OSError, RuntimeError):
+        root_res = Path(root) if root is not None else None
+
+    def _in_root(path_str: str) -> bool:
+        if root_res is None:
+            return True
+        p = Path(path_str)
+        try:
+            p.relative_to(root_res)
+            return True
+        except ValueError:
+            pass
+        try:
+            p.resolve().relative_to(root_res)
+            return True
+        except (ValueError, OSError, RuntimeError):
+            return False
+
+    current_files = {_nfc(f) for f in scanned}
+    deleted_files: list[str] = []
+    excluded_files: list[str] = []
+    for f in manifest:
+        if not _in_root(f):
+            continue
+        if _nfc(f) in current_files:
+            continue
+        try:
+            alive = Path(f).exists()
+        except OSError:
+            alive = False
+        (excluded_files if alive else deleted_files).append(f)
+
+    return deleted_files, excluded_files
+
+
 def detect_incremental(
     root: Path,
     manifest_path: str = _MANIFEST_PATH,
@@ -2946,108 +3086,15 @@ def detect_incremental(
         full["excluded_files"] = []
         return full
 
-    new_files: dict[str, list[str]] = {k: [] for k in full["files"]}
-    unchanged_files: dict[str, list[str]] = {k: [] for k in full["files"]}
-
-    for ftype, file_list in full["files"].items():
-        for f in file_list:
-            # Manifest keys are NFC; scan paths may arrive NFD (#2221).
-            stored = manifest.get(_nfc(f))
-            try:
-                current_mtime = os.stat(_os_path(Path(f))).st_mtime
-            except Exception:
-                current_mtime = 0
-
-            # Legacy manifest: plain float value stores only mtime.
-            # Compare with `!=` so backwards mtime motion (git checkout of an
-            # older commit, tarball restore, rsync --times) still triggers a
-            # re-extract; the previous `>` silently kept the stale cache and
-            # the graph drifted from disk (#1859). No stored hash means we
-            # cannot verify content — any mtime delta forces a re-extract,
-            # and the next save promotes the entry into the dict schema.
-            # A language change invalidates even identical bytes and legacy rows.
-            stored_lang = stored.get("language") if isinstance(stored, dict) else None
-            if stored is not None and cache_salt(f) != stored_lang:
-                changed = True
-            elif isinstance(stored, (int, float)):
-                changed = current_mtime != stored
-            elif isinstance(stored, dict):
-                # Normalise legacy {mtime, hash} to new schema
-                if "hash" in stored and "ast_hash" not in stored:
-                    stored = {"mtime": stored.get("mtime", 0), "ast_hash": stored["hash"], "semantic_hash": ""}
-                hash_key = "semantic_hash" if kind == "semantic" else "ast_hash"
-                stored_hash = stored.get(hash_key, "")
-                # Missing semantic_hash means update ran but extract hasn't — always re-extract
-                if not stored_hash:
-                    changed = True
-                else:
-                    stored_mtime = stored.get("mtime")
-                    # Schema-drift guard (#1163): tolerate a nested {mtime: ...}
-                    # dict or any non-numeric value without crashing.
-                    if isinstance(stored_mtime, dict):
-                        stored_mtime = stored_mtime.get("mtime")
-                    if not isinstance(stored_mtime, (int, float)):
-                        stored_mtime = None
-                    if stored_mtime is None or current_mtime != stored_mtime:
-                        # mtime bumped — verify with content hash before re-extracting
-                        changed = _md5_file(Path(f)) != stored_hash
-                    elif _mtime_may_hide_a_rewrite(current_mtime, stored):
-                        # mtime is unchanged, but it was recorded in the same
-                        # filesystem tick the file was written in — a later
-                        # same-length edit lands in that tick without moving
-                        # mtime, and the file silently skips re-extraction
-                        # while the graph keeps serving the old content.
-                        # Only this narrow window pays for a content hash.
-                        changed = _md5_file(Path(f)) != stored_hash
-                    else:
-                        changed = False
-            else:
-                changed = True  # unknown format, re-extract to be safe
-
-            if changed:
-                new_files[ftype].append(f)
-            else:
-                unchanged_files[ftype].append(f)
-
-    # Manifest rows that left the corpus, split by disk existence (#1908):
-    # a row whose file is gone from DISK is a genuine deletion (its cached
-    # nodes are ghosts); a row whose file still exists but is out of the
-    # current scan was EXCLUDED (ignore rules / --exclude changed) and must
-    # not be reported as deleted. Mirrors the watch-side excluded-vs-deleted
-    # distinction (#1795).
-    try:
-        root_res: Path | None = Path(root).resolve() if root is not None else None
-    except (OSError, RuntimeError):
-        root_res = Path(root) if root is not None else None
-
-    def _in_root(path_str: str) -> bool:
-        if root_res is None:
-            return True
-        p = Path(path_str)
-        try:
-            p.relative_to(root_res)
-            return True
-        except ValueError:
-            pass
-        try:
-            p.resolve().relative_to(root_res)
-            return True
-        except (ValueError, OSError, RuntimeError):
-            return False
-
-    current_files = {_nfc(f) for flist in full["files"].values() for f in flist}
-    deleted_files: list[str] = []
-    excluded_files: list[str] = []
-    for f in manifest:
-        if not _in_root(f):
-            continue
-        if _nfc(f) in current_files:
-            continue
-        try:
-            alive = Path(f).exists()
-        except OSError:
-            alive = False
-        (excluded_files if alive else deleted_files).append(f)
+    new_files, unchanged_files = classify_manifest_files(
+        full["files"], manifest, kind=kind
+    )
+    # Manifest rows that left the corpus, split by disk existence (#1908).
+    deleted_files, excluded_files = classify_manifest_deletions(
+        manifest,
+        (f for flist in full["files"].values() for f in flist),
+        root=root,
+    )
 
     new_total = sum(len(v) for v in new_files.values())
     full["incremental"] = True
