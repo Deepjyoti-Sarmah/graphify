@@ -253,8 +253,22 @@ class Project:
 
     def real(self, name: str) -> None:
         """Run the rendered block exactly as shipped, with no policy injected."""
+        self.real_block(BODIES[name])
+
+    def real_block(self, block: str) -> None:
+        """Run a rendered bash block through its shell wrapper.
+
+        The merge block is a ``python -c "..."`` payload. Running the source
+        directly (as the manifest-tail test does) would not catch a quoting
+        error in the wrapper.
+        """
         subprocess.run(
-            ["bash", "-e", "-c", BODIES[name].replace("INPUT_PATH", ".")],
+            [
+                "bash",
+                "-e",
+                "-c",
+                block.replace("INPUT_PATH", ".").replace("IS_DIRECTED", "False"),
+            ],
             cwd=self.root,
             env=self._env(),
             check=True,
@@ -651,6 +665,13 @@ def _update_manifest_tail() -> str:
     return tail[:-1]
 
 
+def _update_merge_block() -> str:
+    """The real --update merge block, shell wrapper included."""
+    arts = gen.render_all(gen.load_platforms(), only="claude")
+    update_md = next(a.content for a in arts if a.path.endswith("references/update.md"))
+    return next(b for b in _bash_blocks(update_md) if "build_merge(" in b)
+
+
 def test_a_half_read_doc_on_the_update_path_is_not_stamped(tmp_path):
     """The sibling gap: --update's own manifest save must not stamp a partial read.
 
@@ -698,6 +719,44 @@ def test_a_half_read_doc_on_the_update_path_is_not_stamped(tmp_path):
     # An update has no Step 9, so this run must clean up the list it consumed.
     assert not (project.out / ".graphify_partial.txt").exists(), (
         "the update runbook left its partial list behind for a later run to read"
+    )
+
+
+def test_the_shipped_update_merge_block_runs_with_a_partial_list(tmp_path):
+    """Drive the whole merge block through bash with the partial list on disk.
+
+    The test above runs the extracted manifest tail as plain Python, so it cannot
+    catch a quoting error in the block's ``python -c "..."`` wrapper. This runs
+    the shipped bash block, which is also the path that evaluates the
+    ``_pf.read_text`` expression when the list exists (#4807).
+    """
+    project = Project(tmp_path, "delete")
+    doc = project.add_doc("long.md")
+    project.run_full_build(
+        chunk_coverage={doc: 10}, extract=[doc], extract_full=False, step9=False
+    )
+    assert (project.out / ".graphify_partial.txt").exists(), "precondition: B3.5 flagged it"
+
+    (project.out / ".graphify_incremental.json").write_text(
+        json.dumps(
+            {
+                "files": {"document": [doc]},
+                "new_files": {"document": [doc]},
+                "new_total": 1,
+                "deleted_files": [],
+                "total_files": 1,
+                "total_words": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+    project.real_block(_update_merge_block())
+
+    assert project.next_update_queue() == {doc}, (
+        "the shipped merge block stamped a partly-read doc"
+    )
+    assert not (project.out / ".graphify_partial.txt").exists(), (
+        "the shipped merge block did not remove the list it consumed"
     )
 
 
