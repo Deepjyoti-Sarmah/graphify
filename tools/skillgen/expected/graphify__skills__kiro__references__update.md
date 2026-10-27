@@ -186,9 +186,10 @@ _cleared = _dispatched - _stamped
 # are dropped rather than masquerading as deletions; untouched rows preserved (#1908).
 _scan = {f for fl in incremental['files'].values() for f in fl}
 save_manifest(_manifest_files, root='INPUT_PATH', scan_corpus=_scan, clear_semantic=_cleared or None)
-# This run was the list's only consumer, and an --update has no Step 9 to clean
-# up after it. Drop it now so no residual state outlives the run (#4814).
-_pf.unlink(missing_ok=True)
+# Keep the list until the next run starts (B0 for a full build, this runbook's
+# top for an update) or Step 9 deletes it. Deleting it here would erase the
+# partial set a re-run of this block needs (#4811/#4807), and the start hooks
+# already stop it from outliving the next run (#4814).
 print('[graphify update] Manifest saved.')
 "
 ```

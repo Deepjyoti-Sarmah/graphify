@@ -716,9 +716,11 @@ def test_a_half_read_doc_on_the_update_path_is_not_stamped(tmp_path):
         "the update path stamped a partly-read doc; its head-only node set would "
         "then be treated as complete forever"
     )
-    # An update has no Step 9, so this run must clean up the list it consumed.
-    assert not (project.out / ".graphify_partial.txt").exists(), (
-        "the update runbook left its partial list behind for a later run to read"
+    # A re-run of the update merge still needs the list (#4811), so the runbook
+    # keeps it. The next run's start hook (B0 for a full build, the update top
+    # for an update) drops it before anything can read it (#4814).
+    assert (project.out / ".graphify_partial.txt").exists(), (
+        "the update runbook deleted the list a merge re-run needs (#4811)"
     )
 
 
@@ -755,8 +757,8 @@ def test_the_shipped_update_merge_block_runs_with_a_partial_list(tmp_path):
     assert project.next_update_queue() == {doc}, (
         "the shipped merge block stamped a partly-read doc"
     )
-    assert not (project.out / ".graphify_partial.txt").exists(), (
-        "the shipped merge block did not remove the list it consumed"
+    assert (project.out / ".graphify_partial.txt").exists(), (
+        "the merge must keep the list for a re-run and Step 9 after an update (#4811)"
     )
 
 
