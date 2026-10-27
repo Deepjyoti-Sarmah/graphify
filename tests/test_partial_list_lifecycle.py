@@ -651,14 +651,13 @@ def _update_manifest_tail() -> str:
     return tail[:-1]
 
 
-def test_a_half_read_doc_on_the_update_path_is_still_stamped(tmp_path):
-    """The sibling gap, measured: --update's own manifest save passes no partial set.
+def test_a_half_read_doc_on_the_update_path_is_not_stamped(tmp_path):
+    """The sibling gap: --update's own manifest save must not stamp a partial read.
 
     An update stops before Step 9, so it stamps through the merge block in
-    ``references/update.md``. That call has no ``partial_source_files``, so a
-    doc B3.5 just flagged partial is stamped anyway and never retried.
-    Whichever #4814 fix is chosen must be paired with this one-line change; this
-    test pins today's behaviour so the pairing cannot be forgotten.
+    ``references/update.md``. That call now passes ``partial_source_files``, so a
+    doc B3.5 just flagged partial stays unstamped and the next --update retries
+    it - the same contract the full build's Step 9 has (#4807).
     """
     project = Project(tmp_path, "delete")  # the candidate the scoreboard picks
     doc = project.add_doc("long.md")
@@ -691,10 +690,14 @@ def test_a_half_read_doc_on_the_update_path_is_still_stamped(tmp_path):
         + _update_manifest_tail().replace("INPUT_PATH", ".")
     )
 
-    # Today: the half-read doc is stamped, so the next --update drops it.
-    assert project.next_update_queue() == set(), (
-        "the update path now honours its own partial list - remove this pin and "
-        "add the scenario to the scoreboard"
+    # The half-read doc must stay queued for a retry, not be stamped as done.
+    assert project.next_update_queue() == {doc}, (
+        "the update path stamped a partly-read doc; its head-only node set would "
+        "then be treated as complete forever"
+    )
+    # An update has no Step 9, so this run must clean up the list it consumed.
+    assert not (project.out / ".graphify_partial.txt").exists(), (
+        "the update runbook left its partial list behind for a later run to read"
     )
 
 
