@@ -6,6 +6,12 @@ Load this only when the user passed `--update` or `--cluster-only`. A first-time
 
 Use when you've added or modified files since the last run. Only re-extracts changed files - saves tokens and time.
 
+Start by deleting any partial list a previous run left behind. Step 9 is the only place that cleans it up, and this flow stops before Step 9, so without this line a stale list outlives the run that wrote it and a later full build reads it as its own (#4814). B3.5 writes the file again later in this run, so after this line it can only ever describe this run.
+
+```bash
+rm -f graphify-out/.graphify_partial.txt
+```
+
 ```bash
 $(cat graphify-out/.graphify_python) -c "
 import sys, json

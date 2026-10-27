@@ -251,6 +251,17 @@ class Project:
             text=True,
         )
 
+    def real(self, name: str) -> None:
+        """Run the rendered block exactly as shipped, with no policy injected."""
+        subprocess.run(
+            ["bash", "-e", "-c", BODIES[name].replace("INPUT_PATH", ".")],
+            cwd=self.root,
+            env=self._env(),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
     # -- runbook steps
     def add_doc(self, name: str, lines: int = 3000) -> str:
         body = "".join(f"line {i} about Widget in {name}\n" for i in range(lines))
@@ -568,11 +579,17 @@ def test_edit_site_and_state_budget():
     # 'delete' changes no reader: it only removes a file before it can be read.
     delete_sites = core.count("for stale in Path('graphify-out').glob('.graphify_chunk_*.json')")
     assert delete_sites == 1, "B0's existing stale-file cleanup is the natural home"
-    assert "graphify_partial" not in update_md, (
-        "the --update runbook now mentions the partial list: a start hook was "
-        "shipped, so re-point this harness at the shipped fix instead of the "
-        "simulated 'delete' policy"
+    b0 = BODIES["b0"]
+    assert "Path('graphify-out/.graphify_partial.txt').unlink(missing_ok=True)" in b0, (
+        "B0 must drop the partial list before B3.5 can rewrite it (#4814)"
     )
+    # The update runbook stops before Step 9, so it needs its own start hook.
+    assert "rm -f graphify-out/.graphify_partial.txt" in update_md, (
+        "the --update runbook can write the partial list but never cleans it up"
+    )
+    assert update_md.index("rm -f graphify-out/.graphify_partial.txt") < update_md.index(
+        "detect_incremental("
+    ), "the update's start hook must run before its extraction pipeline"
 
     # 'runid' must touch every reader of the file, not just Step 9.
     b3_cache = next(b for b in _bash_blocks(core) if "partial_source_files=partial" in b)
@@ -589,6 +606,34 @@ def test_edit_site_and_state_budget():
     print(
         "start-hook sites: delete=2 (B0 + update top), runid=2, fresh=0; "
         "new persistent files: runid=1 (.graphify_run_id), delete=0, fresh=0"
+    )
+
+
+def test_the_shipped_runbook_drops_a_stale_list_before_step9(tmp_path):
+    """End-to-end regression for #4814, against the real fragments (no policy shim).
+
+    Reproduction from the issue: an --update left a list naming a doc, then a
+    full build served that doc in full from the semantic cache (so B3.5 never ran
+    and the list was never rewritten). Step 9 must stamp the doc, because this
+    build had it whole.
+    """
+    project = Project(tmp_path, "baseline")  # 'baseline' never touches the real B0 body
+    doc = project.add_doc("long.md")
+    (project.out / ".graphify_partial.txt").write_text(doc + "\n", encoding="utf-8")
+    project.seed_cache([doc])
+    project.detect()
+
+    project.real("b0")  # the shipped B0 must clear the stale list
+    assert not (project.out / ".graphify_partial.txt").exists(), (
+        "B0 left a stale partial list in place; Step 9 would read it as this run's"
+    )
+
+    # The cache hit means B3.5 never runs, so the list stays absent through Step 9.
+    project.write_extract([doc], full=True)
+    project.real("step9")
+    assert project.next_update_queue() == set(), (
+        "#4814 reproduced against the shipped fragments: a doc served in full is "
+        "re-queued because of a stale partial list"
     )
 
 
