@@ -651,21 +651,22 @@ extract = json.loads(Path('graphify-out/.graphify_extract.json').read_text(encod
 # matches cached files instead of missing every one (#1417).
 #
 # Only stamp semantic files (docs/papers/images) that ACTUALLY produced output:
-# a detected file whose chunk failed or was omitted must stay unstamped so the
-# next --update re-queues it, otherwise it is marked done and its content is lost
-# forever (#2015). This mirrors the library extract path exactly
-# (cli._stamped_manifest_files + clear_semantic + scan_corpus); do not stamp the
-# raw corpus. Code files are always stamped (AST is deterministic); only semantic
-# types are gated on output.
+# a detected file whose chunk failed must stay unstamped so the next --update
+# re-queues it (#2015). Stamp from this run's semantic output, not extract: on an
+# --update, extract is the merged graph, so its old nodes would stamp a failed
+# doc (#4811). A missing semantic file means no output: fail closed. Mirrors
+# cli._stamped_manifest_files + clear_semantic + scan_corpus; do not stamp the
+# raw corpus. Code is always stamped (AST is deterministic).
 from graphify.cli import _stamped_manifest_files
 _corpus = detect.get('all_files') or detect['files']
+_sem_path = Path('graphify-out/.graphify_semantic.json'); _semantic = json.loads(_sem_path.read_text(encoding=\"utf-8\")) if _sem_path.exists() else {'nodes': [], 'hyperedges': []}
 # A file a subagent only partly read DID produce output, so the stamp filter alone would
 # keep it - but its node set covers just the head of the file, and stamping it means
 # detect_incremental reads it as done and never re-queues it, leaving the truncated graph
 # live forever. Name those files so they stay unstamped and are retried next run (#2225).
 _pf = Path('graphify-out/.graphify_partial.txt')
 _partial = {l.strip() for l in _pf.read_text(encoding=\"utf-8\").splitlines() if l.strip()} if _pf.exists() else set()
-_manifest_files = _stamped_manifest_files(_corpus, extract, Path('INPUT_PATH'), partial_source_files=_partial)
+_manifest_files = _stamped_manifest_files(_corpus, _semantic, Path('INPUT_PATH'), partial_source_files=_partial)
 # Files dispatched this run (the changed subset) but NOT stamped above still carry
 # a stale semantic_hash from a prior run; clear it so detect_incremental re-queues
 # them instead of reading them as unchanged (#1948).

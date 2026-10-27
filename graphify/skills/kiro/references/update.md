@@ -161,12 +161,19 @@ print(f'[graphify update] Merged extraction written ({len(merged_out[\"nodes\"])
 # cached files instead of missing every one after a move (#1417).
 #
 # Only stamp semantic files (docs/papers/images) that ACTUALLY produced output
-# THIS run (new_extraction is this run's fresh extraction, read above before the
-# merge overwrote the file): a changed doc whose chunk failed must stay unstamped
-# so the next --update re-queues it, otherwise it is marked done and its content
-# is lost forever (#2015). Mirrors the library extract path
-# (cli._stamped_manifest_files + clear_semantic + scan_corpus).
+# THIS run: a changed doc whose chunk failed must stay unstamped so the next
+# --update re-queues it, otherwise it is marked done and its content is lost
+# forever (#2015). Mirrors the library extract path (cli._stamped_manifest_files
+# + clear_semantic + scan_corpus).
 from graphify.cli import _stamped_manifest_files
+# Stamp from this run's semantic output, not new_extraction. The write above
+# replaced .graphify_extract.json with the merged graph, so a re-run of this
+# block would read every old semantic node as fresh output and stamp a changed
+# doc whose chunk failed (#4811). .graphify_semantic.json is written by Part B
+# for this run (cache hits included) and the merge does not overwrite it. A
+# missing file means no semantic output: fail closed, never fall back.
+_sem_path = Path('graphify-out/.graphify_semantic.json')
+_semantic = json.loads(_sem_path.read_text(encoding=\"utf-8\")) if _sem_path.exists() else {'nodes': [], 'hyperedges': []}
 # An --update stops before Step 9, so this merge is the run's ONLY manifest save.
 # A file B3.5 just flagged as partly read did produce output, so the stamp filter
 # alone would keep it - but its node set covers only the head of the file, and
@@ -175,7 +182,7 @@ from graphify.cli import _stamped_manifest_files
 # as the full build's Step 9 does (#4814).
 _pf = Path('graphify-out/.graphify_partial.txt')
 _partial = {line.strip() for line in _pf.read_text(encoding=\"utf-8\").splitlines() if line.strip()} if _pf.exists() else set()
-_manifest_files = _stamped_manifest_files(incremental['files'], new_extraction, Path('INPUT_PATH'), partial_source_files=_partial)
+_manifest_files = _stamped_manifest_files(incremental['files'], _semantic, Path('INPUT_PATH'), partial_source_files=_partial)
 # Changed semantic files dispatched this run but NOT stamped had their chunk fail
 # or be omitted; clear any stale semantic_hash so they are re-queued (#1948).
 _sem_types = ('document', 'paper', 'image')

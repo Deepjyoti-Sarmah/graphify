@@ -332,28 +332,43 @@ class Project:
             encoding="utf-8",
         )
 
-    def write_extract(self, names: list[str], *, full: bool) -> None:
-        nodes = []
-        for n in names:
-            nodes.append(
+    def write_extract(
+        self,
+        names: list[str],
+        *,
+        full: bool,
+        semantic_names: list[str] | None = None,
+    ) -> None:
+        """This run's extraction files.
+
+        ``.graphify_semantic.json`` is Part B's output and ``.graphify_extract.json``
+        is Part C's AST + semantic result. Step 9 now stamps from the semantic file
+        (#4811), so a full-build simulation must write both. Docs are semantic by
+        default; code-only callers pass ``semantic_names=[]``.
+        """
+        def nodes_for(docs: list[str]) -> list[dict]:
+            return [
                 {
                     "id": f"{Path(n).stem}_{'widget' if full else 'head'}",
                     "label": f"{'Widget' if full else 'Head'} {n}",
                     "file_type": "document",
                     "source_file": n,
                 }
-            )
+                for n in docs
+            ]
+
+        semantic = nodes_for(names if semantic_names is None else semantic_names)
+        payload = {
+            "edges": [],
+            "hyperedges": [],
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
+        (self.out / ".graphify_semantic.json").write_text(
+            json.dumps({**payload, "nodes": semantic}), encoding="utf-8"
+        )
         (self.out / ".graphify_extract.json").write_text(
-            json.dumps(
-                {
-                    "nodes": nodes,
-                    "edges": [],
-                    "hyperedges": [],
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                }
-            ),
-            encoding="utf-8",
+            json.dumps({**payload, "nodes": nodes_for(names)}), encoding="utf-8"
         )
 
     def run_full_build(
@@ -451,7 +466,7 @@ def _scenario_code_only_update(project: Project) -> set[str]:
     project.begin_run()  # update top hook
     code = project.add_doc("main.py", lines=5)
     project.detect()  # the update runbook writes .graphify_detect.json with changed subset
-    project.write_extract([code], full=True)
+    project.write_extract([code], full=True, semantic_names=[])
     project.py(
         "import json\nfrom pathlib import Path\nfrom graphify.cli import _stamped_manifest_files\n"
         "from graphify.detect import save_manifest\n"
