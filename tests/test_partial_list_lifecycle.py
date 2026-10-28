@@ -652,17 +652,26 @@ def test_the_shipped_runbook_drops_a_stale_list_before_step9(tmp_path):
 
 
 def _update_manifest_tail() -> str:
-    """The real manifest-save tail of the --update runbook, from the rendered reference."""
+    """The real manifest-save half of the --update runbook, as plain Python.
+
+    The runbook reaches its manifest save in two steps: the pre-merge snapshot of
+    this run's extraction (#4811), then the save itself. Both are part of the same
+    contract, so the returned source includes both real fragments and leaves out
+    only ``build_merge``, which the fixtures replace with their own extraction.
+    """
     arts = gen.render_all(gen.load_platforms(), only="claude")
     update_md = next(a.content for a in arts if a.path.endswith("references/update.md"))
     block = next(b for b in _bash_blocks(update_md) if "_stamped_manifest_files" in b)
+    snap_start = block.index("_snapf = Path('graphify-out/.graphify_extract_run.json')")
+    snap_end = block.index("\n", block.index("_snap = json.loads(_snapf.read_text"))
+    snapshot = block[snap_start:snap_end]
     tail = block[block.index("from graphify.cli import _stamped_manifest_files") :]
     # The block is a shell double-quoted `python -c "..."` payload: unescape it
     # and drop the shell's closing quote so it can run as a plain Python source.
     tail = tail.replace('\\"', '"')
     tail = tail.rstrip()
     assert tail.endswith('"'), "unexpected shell wrapper around the update manifest tail"
-    return tail[:-1]
+    return snapshot.replace('\\"', '"') + "\n" + tail[:-1]
 
 
 def _update_merge_block() -> str:

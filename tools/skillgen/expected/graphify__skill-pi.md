@@ -255,11 +255,12 @@ Path('graphify-out/.graphify_uncached.txt').write_text('\n'.join(uncached), enco
 # interrupted run, and Step B3 merges every .graphify_chunk_*.json it finds.
 for stale in Path('graphify-out').glob('.graphify_chunk_*.json'):
     stale.unlink()
-# Same rule for the partial list: only this run's B3.5 may write it. A list left by
-# an earlier run (an --update stops before Step 9's cleanup) must never reach Step 9,
-# or a doc this build served in full from the cache stays unstamped and is re-queued
-# (#4814). Delete it here, before B3.5 can rewrite it.
+# Same rule for the partial list and for a previous --update's extraction snapshot
+# (#4811): both outlive that run, and a later full build must not read either as its
+# own. Delete them here, before the stages that write them (#4814). Step 9 falls back
+# to .graphify_extract.json, which IS this run's output on a full build.
 Path('graphify-out/.graphify_partial.txt').unlink(missing_ok=True)
+Path('graphify-out/.graphify_extract_run.json').unlink(missing_ok=True)
 print(f'Cache: {len(all_files)-len(uncached)} files hit, {len(uncached)} files need extraction')
 "
 ```
@@ -695,7 +696,7 @@ cost_path.write_text(json.dumps(cost, indent=2, ensure_ascii=False), encoding=\"
 print(f'This run: {input_tok:,} input tokens, {output_tok:,} output tokens')
 print(f'All time: {cost[\"total_input_tokens\"]:,} input, {cost[\"total_output_tokens\"]:,} output ({len(cost[\"runs\"])} runs)')
 "
-rm -f graphify-out/.graphify_detect.json graphify-out/.graphify_extract.json graphify-out/.graphify_ast.json graphify-out/.graphify_semantic.json graphify-out/.graphify_analysis.json graphify-out/.graphify_partial.txt
+rm -f graphify-out/.graphify_detect.json graphify-out/.graphify_extract.json graphify-out/.graphify_ast.json graphify-out/.graphify_semantic.json graphify-out/.graphify_analysis.json graphify-out/.graphify_extract_run.json graphify-out/.graphify_partial.txt
 find graphify-out -maxdepth 1 -name '.graphify_chunk_*.json' -delete 2>/dev/null
 rm -f graphify-out/.needs_update 2>/dev/null || true
 ```
