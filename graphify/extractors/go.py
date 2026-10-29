@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from graphify.ids import DeclIdRegistry
 from graphify.extractors.base import (
     _LANGUAGE_BUILTIN_GLOBALS,
     _file_stem,
@@ -282,6 +283,7 @@ def extract_go(path: Path) -> dict:
 
     file_nid = _make_id(str(path))
     add_node(file_nid, path.name, 1)
+    decl_registry = DeclIdRegistry(reserved_ids=(file_nid,))
 
     def ensure_named_node(name: str, line: int) -> str:
         nid = type_symbol_nid(name)
@@ -446,21 +448,20 @@ def extract_go(path: Path) -> dict:
         for child in node.children:
             _scan_declarations(child)
 
-    def symbol_nid(plain_nid: str, name: str) -> str:
+    def symbol_nid(plain_nid: str, name: str, kind: str = "fn") -> str:
+        nid = plain_nid
         names = case_groups.get(plain_nid) or set()
-        if len(names) < 2:
-            return plain_nid
-        exported = [n for n in names if n[:1].isupper()]
-        if len(exported) == 1 and name == exported[0]:
-            return plain_nid
-        salt = hashlib.sha1(name.encode("utf-8"), usedforsecurity=False).hexdigest()[:6]
-        return _make_id(plain_nid, salt)
+        if len(names) >= 2 and not (len([n for n in names if n[:1].isupper()]) == 1
+                                    and name == [n for n in names if n[:1].isupper()][0]):
+            salt = hashlib.sha1(name.encode("utf-8"), usedforsecurity=False).hexdigest()[:6]
+            nid = _make_id(plain_nid, salt)
+        return decl_registry.resolve(nid, name, kind, seen_ids)
 
     def type_symbol_nid(name: str) -> str:
         plain_nid = _make_id(pkg_scope, name)
         if name not in case_groups.get(plain_nid, ()):
-            return plain_nid
-        return symbol_nid(plain_nid, name)
+            return decl_registry.resolve(plain_nid, name, "type", seen_ids)
+        return symbol_nid(plain_nid, name, "type")
 
     def walk(node) -> None:
         t = node.type
