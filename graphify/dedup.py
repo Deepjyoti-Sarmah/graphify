@@ -478,11 +478,23 @@ def _collision_rank(node: dict, root: Path | None = None,
     also holds a shorter path-slice id from a file that has its own page
     (``_slice_references``), so a bare ``protocol`` inside docs/protocol.md cannot
     outrank the real top-level protocol.md on label length.
+
+    The first key only separates a definer from a mere reference; it ties when
+    BOTH colliding nodes define the id, which a doc's own path and the code
+    file it describes can both do for the id the extraction spec asks the doc
+    to reuse. Nothing after it spoke to that case either, so the tie fell all
+    the way to label length and a briefly named doc node could outrank the
+    real AST node for the entity it only describes (#4859). An AST-tier node
+    now beats a semantic-tier one right after the first key, mirroring the
+    project convention that extracted fact outranks inference about it. It
+    changes no collision where the two sides already differ on the first key.
     """
+    from graphify.build import _is_ast_tier
     label = node.get("label") or ""
     rank_path = _rank_path(node.get("source_file") or "", root)
     return (
         not _defines_id(node) or (node.get("id"), rank_path) in mentions,
+        not _is_ast_tier(node),  # extracted fact beats semantic inference (#4859)
         not node.get("source_file"),  # a located node beats a source-less one (#4492)
         _lifecycle_penalty(rank_path),  # active paths beat archived ones (#2532)
         len(label),             # shorter, more canonical label first
