@@ -67,12 +67,6 @@ def _node(result: dict, label: str, suffix: str) -> dict:
     return matches[0]
 
 
-def _node_at(result: dict, label: str) -> dict:
-    matches = [n for n in result["nodes"] if n.get("label") == label]
-    assert len(matches) == 1, (label, matches)
-    return matches[0]
-
-
 def _edges(result: dict, relation: str) -> list[dict]:
     return [e for e in result["edges"] if e.get("relation") == relation]
 
