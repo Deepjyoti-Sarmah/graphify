@@ -481,8 +481,14 @@ def _collision_rank(node: dict, root: Path | None = None,
     """
     label = node.get("label") or ""
     rank_path = _rank_path(node.get("source_file") or "", root)
+    defines = _defines_id(node)
     return (
-        not _defines_id(node) or (node.get("id"), rank_path) in mentions,
+        not defines or (node.get("id"), rank_path) in mentions,
+        # #4859: when both paths define the id, the extracted fact outranks
+        # an inference that merely spells the same id. Without this key the
+        # next key is label length, so a doc titled "Tests" takes the code
+        # node, and the doc's next re-extract deletes it.
+        (0 if node.get("_origin") == "ast" else 1) if defines else 0,
         not node.get("source_file"),  # a located node beats a source-less one (#4492)
         _lifecycle_penalty(rank_path),  # active paths beat archived ones (#2532)
         len(label),             # shorter, more canonical label first
