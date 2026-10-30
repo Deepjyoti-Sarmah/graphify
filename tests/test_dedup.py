@@ -890,6 +890,40 @@ def test_sourced_node_survives_a_source_less_namesake_order_independent():
         assert out[0] == sourced
 
 
+def test_ast_node_survives_a_defining_doc_namesake_order_independent():
+    """#4859: when a doc's own path AND the code file it describes both encode
+    the id the extraction spec asks the doc to reuse, both sides tie on the
+    first `_collision_rank` key (both define it) and used to fall straight
+    through to label length. A doc node with a shorter label than the real
+    AST node it describes used to win that tie, so the AST node was the one
+    getting dropped — and the doc's own next re-extract (without that node)
+    would then delete it outright. An AST-tier node must beat a semantic-tier
+    one right after the first key, whichever order they arrive in and however
+    short the doc's label is."""
+    import itertools
+    code = {"id": "pkg_test_x", "label": "test_x.py", "file_type": "code",
+            "source_file": "pkg/test_x.py", "source_location": "L1", "_origin": "ast"}
+    doc = {"id": "pkg_test_x", "label": "Tests", "file_type": "code",
+           "source_file": "pkg.md", "_origin": "semantic"}
+    for perm in itertools.permutations([code, doc]):
+        out, _ = deduplicate_entities([dict(n) for n in perm], [], communities={})
+        assert len(out) == 1
+        assert out[0] == code
+
+
+def test_semantic_reference_still_loses_to_a_defining_doc():
+    """Control: the new tier key only matters once the first key ties (both
+    nodes define the id). A semantic node that merely REFERENCES the id still
+    loses to a doc that defines it, tier aside."""
+    defining_doc = {"id": "pkg_test_x", "label": "Tests", "file_type": "code",
+                     "source_file": "pkg.md", "_origin": "semantic"}
+    referencing_doc = {"id": "pkg_test_x", "label": "the tests module",
+                        "file_type": "code", "source_file": "other.md",
+                        "_origin": "semantic"}
+    assert _defines_id(defining_doc) and not _defines_id(referencing_doc)
+    assert _collision_rank(defining_doc) < _collision_rank(referencing_doc)
+
+
 def test_checkout_dir_lifecycle_name_does_not_mark_paths(tmp_path):
     """Gap in #2540: markers must be matched on ROOT-RELATIVE segments only. An
     absolute source_file stored under a checkout directory named `wip` must not
