@@ -7804,7 +7804,7 @@ def _resolve_kotlin_member_calls(
         if not n.get("_callable_class"):
             continue
         sf = str(n.get("source_file") or "")
-        if not sf.endswith((".kt", ".kts")):
+        if _lang_family(sf) != "jvm":
             continue
         name = str(n.get("label", ""))
         if name:
