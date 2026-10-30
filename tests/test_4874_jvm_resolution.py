@@ -5,6 +5,7 @@ the three reported failures plus controls that must keep passing:
 
   * Kotlin imports a Java class used only in a static call.
   * Java imports and extends a Kotlin class.
+  * Kotlin calls a static Java method through that class.
   * `affected` must reach both language sides through the class node.
   * A Java/Kotlin import with a local definition must not be marked external.
   * An external import must not bind to a same-named local class.
@@ -124,6 +125,16 @@ def test_java_import_and_inheritance_of_kotlin_class_target_the_class_node(tmp_p
         for e in _edges(result, "imports")
         if e.get("source") == java_file["id"]
     ), "the Java import must not be parked on a source-less FQN stub"
+
+
+def test_kotlin_member_call_reaches_the_java_method(tmp_path: Path) -> None:
+    result = _extract(tmp_path, PKG)
+    kotlin_run = _node(result, ".run()", "KotlinUser.kt")
+    logger_info = _node(result, ".info()", "Logger.java")
+
+    assert _edge(result, kotlin_run["id"], "calls", logger_info["id"]), (
+        "KotlinUser.run() must call Logger.info() across the JVM language boundary"
+    )
 
 
 def test_affected_reaches_dependents_in_both_languages(tmp_path: Path) -> None:
