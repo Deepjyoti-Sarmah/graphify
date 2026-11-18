@@ -194,12 +194,15 @@ def test_interface_hierarchy_is_not_walked_transitively(tmp_path):
 
 
 def test_java_interface_and_implementation_are_untouched(tmp_path):
-    # The resolver is registered for .cs; a Java corpus must not gain the edge.
-    dispatch, _ = _extract(tmp_path, {
+    # The C# pass is registered for .cs only. A Java pair now gets its edge from
+    # the Java pass (#5319), so the one edge here must be Java-to-Java.
+    dispatch, r = _extract(tmp_path, {
         "IReport.java": "public interface IReport { void build(); }\n",
         "Report.java": "public class Report implements IReport { public void build() { } }\n",
     })
-    assert not dispatch
+    by_id = {n["id"]: n for n in r["nodes"]}
+    linked = {(by_id[s].get("source_file"), by_id[t].get("source_file")) for s, t in dispatch}
+    assert linked == {("IReport.java", "Report.java")}
 
 def test_case_only_member_difference_is_not_a_match(tmp_path):
     # C# is case sensitive: an implementation must spell the member exactly, so
@@ -295,6 +298,8 @@ def test_a_gate_failing_implementer_does_not_dilute_confidence(tmp_path):
 
 
 def test_mixed_corpus_links_only_the_csharp_pair(tmp_path):
+    # Each language's pass links its own pair; no edge crosses languages. The
+    # Java pair is linked by the Java pass (#5319), not by this one.
     dispatch, r = _extract(tmp_path, {
         "IReport.cs": "public interface IReport { void Build(); }\n",
         "Report.cs": "public class Report : IReport { public void Build() { } }\n",
@@ -303,7 +308,7 @@ def test_mixed_corpus_links_only_the_csharp_pair(tmp_path):
     })
     by_id = {n["id"]: n for n in r["nodes"]}
     linked = {(by_id[s].get("source_file"), by_id[t].get("source_file")) for s, t in dispatch}
-    assert linked == {("IReport.cs", "Report.cs")}
+    assert linked == {("IReport.cs", "Report.cs"), ("IJob.java", "Job.java")}
 
 def test_member_name_is_read_up_to_the_first_parenthesis(tmp_path):
     # The pair match is keyed on this string. C# labels are `.Name()` today, so
