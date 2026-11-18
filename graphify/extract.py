@@ -28,6 +28,7 @@ from .resolver_registry import (
 from .ruby_resolution import resolve_ruby_member_calls
 from .csharp_dispatch import resolve_csharp_interface_dispatch
 from .go_dispatch import resolve_go_interface_dispatch
+from .java_dispatch import resolve_java_interface_dispatch
 from .swift_dispatch import resolve_swift_protocol_dispatch
 from .pascal_class_resolution import resolve_pascal_base_classes
 from .dfm_resolution import resolve_dfm_handlers
@@ -10065,6 +10066,13 @@ register_language_resolver(
 register_language_resolver(
     LanguageResolver(
         "go_interface_dispatch", frozenset({".go"}), resolve_go_interface_dispatch
+    )
+)
+# Java member-level interface dispatch (#5319): the same edge for a call through
+# an interface-typed field or parameter. Lives in graphify.java_dispatch.
+register_language_resolver(
+    LanguageResolver(
+        "java_interface_dispatch", frozenset({".java"}), resolve_java_interface_dispatch
     )
 )
 # Markdown code-span mentions (`Widget`, `mod.py::Widget::render`) become
